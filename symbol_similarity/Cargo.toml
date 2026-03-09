@@ -1,0 +1,5 @@
+[package]
+name = "symbol_similarity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

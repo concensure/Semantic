@@ -1,0 +1,23 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+engine = { path = "../engine" }
+indexer = { path = "../indexer" }
+retrieval = { path = "../retrieval" }
+storage = { path = "../storage" }
+watcher = { path = "../watcher" }
+refactor_graph = { path = "../refactor_graph" }
+debug_graph = { path = "../debug_graph" }
+pipeline_graph = { path = "../pipeline_graph" }

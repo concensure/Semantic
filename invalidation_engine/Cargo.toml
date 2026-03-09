@@ -1,0 +1,8 @@
+[package]
+name = "invalidation_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }

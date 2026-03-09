@@ -1,0 +1,14 @@
+[package]
+name = "parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+engine = { path = "../engine" }
+ast_cache = { path = "../ast_cache" }
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-typescript.workspace = true

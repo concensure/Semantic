@@ -1,0 +1,10 @@
+[package]
+name = "policy_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+engine = { path = "../engine" }
+serde.workspace = true

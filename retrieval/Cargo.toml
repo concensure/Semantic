@@ -1,0 +1,40 @@
+[package]
+name = "retrieval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+engine = { path = "../engine" }
+storage = { path = "../storage" }
+serde_json.workspace = true
+reqwest.workspace = true
+planner = { path = "../planner" }
+budgeter = { path = "../budgeter" }
+semantic_search = { path = "../semantic_search" }
+workspace = { path = "../workspace" }
+impact_analysis = { path = "../impact_analysis" }
+safe_edit_planner = { path = "../safe_edit_planner" }
+patch_engine = { path = "../patch_engine" }
+llm_router = { path = "../llm_router" }
+policy_engine = { path = "../policy_engine" }
+patch_memory = { path = "../patch_memory" }
+code_health = { path = "../code_health" }
+architecture_analysis = { path = "../architecture_analysis" }
+improvement_planner = { path = "../improvement_planner" }
+evolution_graph = { path = "../evolution_graph" }
+knowledge_graph = { path = "../knowledge_graph" }
+org_graph = { path = "../org_graph" }
+service_graph = { path = "../service_graph" }
+api_contract_graph = { path = "../api_contract_graph" }
+dependency_intelligence = { path = "../dependency_intelligence" }
+change_propagation = { path = "../change_propagation" }
+organization_planner = { path = "../organization_planner" }
+debug_graph = { path = "../debug_graph" }
+test_coverage = { path = "../test_coverage" }
+test_planner = { path = "../test_planner" }
+pipeline_graph = { path = "../pipeline_graph" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,13 @@
+[package]
+name = "organization_planner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+change_propagation = { path = "../change_propagation" }
+engine = { path = "../engine" }
+refactor_graph = { path = "../refactor_graph" }
+serde.workspace = true
+serde_json.workspace = true

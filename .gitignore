@@ -1,0 +1,28 @@
+# Semantic project gitignore
+
+# Build output
+target/
+.tmp/
+
+# Cargo
+.cargo/
+.cargo_target/
+Cargo.lock
+
+# Semantic runtime config (generated at runtime)
+.semantic/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

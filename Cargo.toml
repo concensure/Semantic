@@ -1,0 +1,68 @@
+[workspace]
+members = [
+  "engine",
+  "parser",
+  "storage",
+  "indexer",
+  "retrieval",
+  "watcher",
+  "api",
+  "planner",
+  "budgeter",
+  "workspace",
+  "repo_registry",
+  "symbol_similarity",
+  "semantic_search",
+  "invalidation_engine",
+  "ast_cache",
+  "impact_analysis",
+  "safe_edit_planner",
+  "patch_engine",
+  "llm_router",
+  "policy_engine",
+  "patch_memory",
+  "refactor_graph",
+  "code_health",
+  "architecture_analysis",
+  "improvement_planner",
+  "evolution_graph",
+  "knowledge_graph",
+  "org_graph",
+  "service_graph",
+  "api_contract_graph",
+  "dependency_intelligence",
+  "change_propagation",
+  "organization_planner",
+  "debug_graph",
+  "test_coverage",
+  "test_planner",
+  "pipeline_graph"
+  ,"mcp_bridge"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+authors = ["Semantic Team"]
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tantivy = "0.22"
+tree-sitter = "0.22"
+tree-sitter-python = "0.21"
+tree-sitter-javascript = "0.21"
+tree-sitter-typescript = "0.21"
+walkdir = "2"
+notify = "6"
+axum = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }

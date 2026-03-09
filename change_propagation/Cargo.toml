@@ -1,0 +1,11 @@
+[package]
+name = "change_propagation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dependency_intelligence = { path = "../dependency_intelligence" }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "dependency_intelligence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+org_graph = { path = "../org_graph" }
+serde.workspace = true
+serde_json.workspace = true
+storage = { path = "../storage" }
