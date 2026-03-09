@@ -1,0 +1,15 @@
+[package]
+name = "indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+engine = { path = "../engine" }
+parser = { path = "../parser" }
+storage = { path = "../storage" }
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

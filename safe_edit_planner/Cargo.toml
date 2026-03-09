@@ -1,0 +1,15 @@
+[package]
+name = "safe_edit_planner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+engine = { path = "../engine" }
+impact_analysis = { path = "../impact_analysis" }
+storage = { path = "../storage" }
+patch_memory = { path = "../patch_memory" }
+
+[dev-dependencies]
+tempfile = "3"

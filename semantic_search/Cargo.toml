@@ -1,0 +1,11 @@
+[package]
+name = "semantic_search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+engine = { path = "../engine" }
+storage = { path = "../storage" }
+symbol_similarity = { path = "../symbol_similarity" }
