@@ -5,6 +5,7 @@ const DEFAULT_BASE_URL = (import.meta as any).env?.VITE_SEMANTIC_BASE_URL || "ht
 
 const OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"];
 const ANTHROPIC_MODELS = ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"];
+const OPENROUTER_MODELS = ["anthropic/claude-3.5-sonnet", "openai/gpt-4o-mini", "google/gemini-1.5-pro"];
 
 function upsertEnvVar(env: string, key: string, value: string) {
   const lines = env.split(/\r?\n/).filter(Boolean);
@@ -31,6 +32,7 @@ export function App() {
   const [enableOllama, setEnableOllama] = useState(true);
   const [openAiModel, setOpenAiModel] = useState(OPENAI_MODELS[0]);
   const [anthropicModel, setAnthropicModel] = useState(ANTHROPIC_MODELS[0]);
+  const [openRouterModel, setOpenRouterModel] = useState(OPENROUTER_MODELS[0]);
   const [status, setStatus] = useState("");
 
   const ready = useMemo(() => llmConfig.length > 0 || llmRouting.length > 0, [llmConfig, llmRouting]);
@@ -52,6 +54,7 @@ export function App() {
     let envPayload = envFile;
     envPayload = upsertEnvVar(envPayload, "OPENAI_MODEL", openAiModel);
     envPayload = upsertEnvVar(envPayload, "ANTHROPIC_MODEL", anthropicModel);
+    envPayload = upsertEnvVar(envPayload, "OPENROUTER_MODEL", openRouterModel);
 
     const payload: SettingsPayload = {
       llm_config: llmConfig,
@@ -114,6 +117,15 @@ export function App() {
         <label>Anthropic model</label>
         <select value={anthropicModel} onChange={(e) => setAnthropicModel(e.target.value)}>
           {ANTHROPIC_MODELS.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+      </section>
+
+      <section className="row">
+        <label>OpenRouter model</label>
+        <select value={openRouterModel} onChange={(e) => setOpenRouterModel(e.target.value)}>
+          {OPENROUTER_MODELS.map((m) => (
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
