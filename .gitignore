@@ -46,3 +46,7 @@ Thumbs.db
 
 # Test repo runtime data
 test_repo/.semantic/
+# UI deps
+.semantic/node_modules/
+.semantic/package-lock.json
+package-lock.json
