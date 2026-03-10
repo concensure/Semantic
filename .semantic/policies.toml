@@ -1,0 +1,6 @@
+protected_paths = ["core/", "security/"]
+
+require_confirmation_for = [
+  "ChangeSignature",
+  "RenameSymbol"
+]
