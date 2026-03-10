@@ -1,0 +1,3 @@
+run_tests = false
+run_lint = false
+run_typecheck = false

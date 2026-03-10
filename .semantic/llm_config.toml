@@ -1,0 +1,30 @@
+[providers]
+openai = "https://api.openai.com/v1"
+anthropic = "https://api.anthropic.com"
+gemini = "https://generativelanguage.googleapis.com"
+openrouter = "https://openrouter.ai/api/v1"
+together = "https://api.together.xyz"
+ollama = "<OLLAMA_BASE_URL>"
+
+[provider_settings.openai]
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[provider_settings.anthropic]
+model = "claude-3-5-sonnet-latest"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[provider_settings.gemini]
+model = "gemini-1.5-pro"
+api_key_env = "GEMINI_API_KEY"
+
+[provider_settings.openrouter]
+model = "openai/gpt-4o-mini"
+api_key_env = "OPENROUTER_API_KEY"
+
+[provider_settings.together]
+model = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
+api_key_env = "TOGETHER_API_KEY"
+
+[provider_settings.ollama]
+model = "llama3.1:8b"

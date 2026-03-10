@@ -11,6 +11,23 @@ Cargo.lock
 
 # Semantic runtime config (generated at runtime)
 .semantic/
+!.semantic/
+!.semantic/llm_config.toml
+!.semantic/llm_routing.toml
+!.semantic/model_metrics.json
+!.semantic/edit_config.toml
+!.semantic/policies.toml
+!.semantic/validation.toml
+!.semantic/index.html
+!.semantic/index.ts
+!.semantic/main.tsx
+!.semantic/style.css
+!.semantic/package.json
+!.semantic/tsconfig.json
+!.semantic/vite.config.ts
+!.semantic/types.ts
+!.semantic/manifest.json
+!.semantic/.env.example
 
 # IDE
 .vscode/
@@ -26,3 +43,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Test repo runtime data
+test_repo/.semantic/
