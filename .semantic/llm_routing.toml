@@ -1,8 +1,9 @@
+# preferred: ordered list of provider keys from llm_config.toml
 [planning]
 preferred = ["anthropic", "openai"]
 
 [execution]
 preferred = ["openai", "ollama", "together"]
 
-[interactive] # This is the ask mode that does not change the code
+[interactive] # ask mode (no code changes)
 preferred = ["openrouter", "openai"]
