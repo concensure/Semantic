@@ -3,6 +3,25 @@ import type { SettingsPayload } from "./types";
 
 const DEFAULT_BASE_URL = (import.meta as any).env?.VITE_SEMANTIC_BASE_URL || "http://127.0.0.1:4317";
 
+const OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"];
+const ANTHROPIC_MODELS = ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"];
+
+function upsertEnvVar(env: string, key: string, value: string) {
+  const lines = env.split(/\r?\n/).filter(Boolean);
+  let found = false;
+  const next = lines.map((line) => {
+    if (line.startsWith(`${key}=`)) {
+      found = true;
+      return `${key}=${value}`;
+    }
+    return line;
+  });
+  if (!found) {
+    next.push(`${key}=${value}`);
+  }
+  return next.join("\n") + "\n";
+}
+
 export function App() {
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
   const [llmConfig, setLlmConfig] = useState("");
@@ -10,6 +29,8 @@ export function App() {
   const [modelMetrics, setModelMetrics] = useState("{}");
   const [envFile, setEnvFile] = useState("");
   const [enableOllama, setEnableOllama] = useState(true);
+  const [openAiModel, setOpenAiModel] = useState(OPENAI_MODELS[0]);
+  const [anthropicModel, setAnthropicModel] = useState(ANTHROPIC_MODELS[0]);
   const [status, setStatus] = useState("");
 
   const ready = useMemo(() => llmConfig.length > 0 || llmRouting.length > 0, [llmConfig, llmRouting]);
@@ -28,11 +49,15 @@ export function App() {
   }
 
   async function save() {
+    let envPayload = envFile;
+    envPayload = upsertEnvVar(envPayload, "OPENAI_MODEL", openAiModel);
+    envPayload = upsertEnvVar(envPayload, "ANTHROPIC_MODEL", anthropicModel);
+
     const payload: SettingsPayload = {
       llm_config: llmConfig,
       llm_routing: llmRouting,
       model_metrics: modelMetrics,
-      env_file: envFile,
+      env_file: envPayload,
       enable_ollama: enableOllama,
     };
 
@@ -54,6 +79,7 @@ export function App() {
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
+      setEnvFile(envPayload);
       setStatus("Saved settings to server.");
     } catch (err) {
       setStatus(`Save failed: ${String(err)}`);
@@ -75,6 +101,24 @@ export function App() {
         </div>
       </section>
 
+      <section className="row">
+        <label>OpenAI model</label>
+        <select value={openAiModel} onChange={(e) => setOpenAiModel(e.target.value)}>
+          {OPENAI_MODELS.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+      </section>
+
+      <section className="row">
+        <label>Anthropic model</label>
+        <select value={anthropicModel} onChange={(e) => setAnthropicModel(e.target.value)}>
+          {ANTHROPIC_MODELS.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+      </section>
+
       <section>
         <div className="label">llm_config.toml</div>
         <textarea value={llmConfig} onChange={(e) => setLlmConfig(e.target.value)} rows={14} />
@@ -91,7 +135,7 @@ export function App() {
       </section>
 
       <section>
-        <div className="label">.env (API keys)</div>
+        <div className="label">.env (API keys + models)</div>
         <textarea value={envFile} onChange={(e) => setEnvFile(e.target.value)} rows={8} />
       </section>
 
