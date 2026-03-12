@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use budgeter::{select_with_budget, ContextBudget, ContextItem};
-use engine::{LogicNodeRecord, Operation, RetrievalRequest, RetrievalResponse, SymbolRecord, SymbolType};
+use engine::{
+    LogicNodeRecord, Operation, RetrievalRequest, RetrievalResponse, SymbolRecord, SymbolType,
+};
 use planner::Planner;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -8,8 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub struct RetrievalService {
     repo_root: PathBuf,
@@ -41,7 +43,6 @@ struct OpPerf {
     max_ms: u128,
     samples_ms: VecDeque<u128>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoTask {
@@ -183,12 +184,16 @@ impl RetrievalService {
             }
             Operation::GetDependencyNeighborhood => {
                 let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                let radius = request.radius.ok_or_else(|| anyhow!("radius is required"))?;
+                let radius = request
+                    .radius
+                    .ok_or_else(|| anyhow!("radius is required"))?;
                 self.get_dependency_neighborhood(&name, radius)?
             }
             Operation::GetSymbolNeighborhood => {
                 let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                let radius = request.radius.ok_or_else(|| anyhow!("radius is required"))?;
+                let radius = request
+                    .radius
+                    .ok_or_else(|| anyhow!("radius is required"))?;
                 self.get_symbol_neighborhood(&name, radius)?
             }
             Operation::GetReasoningContext => {
@@ -211,6 +216,7 @@ impl RetrievalService {
                     max_tokens,
                     single_file_fast_path.unwrap_or(false),
                     include_raw_code_override,
+                    None,
                 )?
             }
             Operation::GetRepoMapHierarchy => self.get_repo_map_hierarchy()?,
@@ -381,7 +387,8 @@ impl RetrievalService {
     pub fn get_evolution_issues(&self, repository: &str) -> Result<serde_json::Value> {
         let code_issues =
             code_health::CodeHealthAnalyzer::analyze(&self.repo_root, repository, &self.storage)?;
-        let architecture_issues = architecture_analysis::ArchitectureAnalyzer::analyze(&self.storage)?;
+        let architecture_issues =
+            architecture_analysis::ArchitectureAnalyzer::analyze(&self.storage)?;
         Ok(json!({
             "repository": repository,
             "code_health_issues": code_issues,
@@ -392,8 +399,12 @@ impl RetrievalService {
     pub fn get_evolution_plans(&self, repository: &str) -> Result<serde_json::Value> {
         let code_issues =
             code_health::CodeHealthAnalyzer::analyze(&self.repo_root, repository, &self.storage)?;
-        let architecture_issues = architecture_analysis::ArchitectureAnalyzer::analyze(&self.storage)?;
-        let plans = improvement_planner::ImprovementPlanner::from_issues(&code_issues, &architecture_issues);
+        let architecture_issues =
+            architecture_analysis::ArchitectureAnalyzer::analyze(&self.storage)?;
+        let plans = improvement_planner::ImprovementPlanner::from_issues(
+            &code_issues,
+            &architecture_issues,
+        );
         Ok(json!({
             "repository": repository,
             "plans": plans,
@@ -407,8 +418,12 @@ impl RetrievalService {
     ) -> Result<serde_json::Value> {
         let code_issues =
             code_health::CodeHealthAnalyzer::analyze(&self.repo_root, repository, &self.storage)?;
-        let architecture_issues = architecture_analysis::ArchitectureAnalyzer::analyze(&self.storage)?;
-        let plans = improvement_planner::ImprovementPlanner::from_issues(&code_issues, &architecture_issues);
+        let architecture_issues =
+            architecture_analysis::ArchitectureAnalyzer::analyze(&self.storage)?;
+        let plans = improvement_planner::ImprovementPlanner::from_issues(
+            &code_issues,
+            &architecture_issues,
+        );
         let graph = evolution_graph::EvolutionGraphBuilder::from_plans(&plans);
         let simulation = evolution_graph::EvolutionGraphBuilder::simulate(&graph)?;
         let risk = estimate_evolution_risk(&self.repo_root, &self.storage, plans.len())?;
@@ -447,7 +462,8 @@ impl RetrievalService {
 
     pub fn get_organization_graph(&self) -> Result<serde_json::Value> {
         let graph = org_graph::OrganizationGraphBuilder::build(&self.storage)?;
-        let contracts = api_contract_graph::APIContractGraphBuilder::scan(&self.repo_root, &self.storage)?;
+        let contracts =
+            api_contract_graph::APIContractGraphBuilder::scan(&self.repo_root, &self.storage)?;
         let deps = dependency_intelligence::DependencyIntelligence::analyze(&self.storage, &graph)?;
         Ok(json!({
             "organization_graph": graph,
@@ -493,11 +509,8 @@ impl RetrievalService {
     }
 
     pub fn debug_failure(&self, event: debug_graph::FailureEvent) -> Result<serde_json::Value> {
-        let analysis = debug_graph::DebugGraphEngine::analyze_failure(
-            &self.repo_root,
-            &self.storage,
-            event,
-        )?;
+        let analysis =
+            debug_graph::DebugGraphEngine::analyze_failure(&self.repo_root, &self.storage, event)?;
         Ok(json!({
             "debug_graph": analysis.debug_graph,
             "root_cause_candidates": analysis.candidates,
@@ -568,12 +581,8 @@ impl RetrievalService {
         )?;
         let plan = test_planner::TestPlanner::build_plan(target_symbol, framework);
         let generated = test_planner::TestPlanner::generate_tests(&plan, framework, &code);
-        let applied = test_planner::TestPlanner::apply_tests(
-            &self.repo_root,
-            repository,
-            &plan,
-            &generated,
-        )?;
+        let applied =
+            test_planner::TestPlanner::apply_tests(&self.repo_root, repository, &plan, &generated)?;
         Ok(json!({
             "test_plan": plan,
             "generated_tests": generated,
@@ -642,7 +651,8 @@ impl RetrievalService {
         let metrics_json =
             std::fs::read_to_string(self.repo_root.join(".semantic").join("model_metrics.json"))
                 .unwrap_or_else(|_| "{}".to_string());
-        let router = llm_router::LLMRouter::from_files(&providers_cfg, &routing_cfg, &metrics_json)?;
+        let router =
+            llm_router::LLMRouter::from_files(&providers_cfg, &routing_cfg, &metrics_json)?;
         let route = provider
             .clone()
             .map(|p| llm_router::RouteDecision {
@@ -682,8 +692,13 @@ impl RetrievalService {
         let mut step_success_with = 0usize;
         let mut task_results = Vec::new();
         let mut context_cache: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut previous_refs: HashSet<String> = HashSet::new();
         let mut context_cache_hits = 0usize;
+        let mut target_match_count = 0usize;
+        let mut empty_ref_tasks = 0usize;
+        let mut heavy_first_tasks = 0usize;
+        let mut semantic_prompt_over_control_count = 0usize;
+        let mut escalation_attempts = 0usize;
+        let mut escalation_guardrail_skips = 0usize;
 
         for task in tasks {
             let semantic_exec = self
@@ -700,8 +715,8 @@ impl RetrievalService {
             }
 
             let cache_key = format!(
-                "{}::{}::autoroute={}",
-                task.semantic_query, max_tokens, autoroute_first
+                "{}::{}::autoroute={}::target={}",
+                task.semantic_query, max_tokens, autoroute_first, task.target_symbol
             );
             let semantic_context = if let Some(cached) = context_cache.get(&cache_key) {
                 context_cache_hits += 1;
@@ -712,6 +727,7 @@ impl RetrievalService {
                         task.semantic_query,
                         max_tokens,
                         single_file_fast_path,
+                        Some(task.target_symbol),
                     )
                     .unwrap_or_else(|_| json!({ "context": [] }))
                 } else {
@@ -720,6 +736,7 @@ impl RetrievalService {
                         max_tokens,
                         single_file_fast_path,
                         Some(false),
+                        Some(task.target_symbol),
                     )
                     .unwrap_or_else(|_| json!({ "context": [] }))
                 };
@@ -743,20 +760,18 @@ impl RetrievalService {
                 .unwrap_or_default();
             let tuning = context_tuning_for_task(&task, impacted_file_count, max_tokens);
             let refs = build_structured_context_refs(&semantic_context, tuning.ref_limit);
-            let delta_refs: Vec<serde_json::Value> = refs
-                .iter()
-                .filter(|r| {
-                    let key = context_ref_key(r);
-                    if previous_refs.contains(&key) {
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .cloned()
-                .collect();
-            for r in &refs {
-                previous_refs.insert(context_ref_key(r));
+            let delta_refs = refs.clone();
+            if delta_refs.is_empty() {
+                empty_ref_tasks += 1;
+            }
+            let planned_target_symbol = semantic_context
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let target_match = planned_target_symbol.eq_ignore_ascii_case(task.target_symbol);
+            if target_match {
+                target_match_count += 1;
             }
             let raw_code_context = if task.requires_code_change {
                 build_context_payload_from_edit_plan_or_fallback(
@@ -797,12 +812,29 @@ impl RetrievalService {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let mut with_prompt_light = build_light_prompt_from_refs(
-                &base_prompt,
-                &delta_refs,
-                delta_refs.len(),
-            );
-            if autoroute_first && task.requires_code_change && !minimal_raw_seed.is_empty() {
+            let minimal_seed_file = semantic_context
+                .get("minimal_raw_seed")
+                .and_then(|v| v.get("file"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let target_symbol_file = self
+                .storage
+                .get_symbol_any(task.target_symbol)
+                .ok()
+                .flatten()
+                .map(|s| s.file)
+                .unwrap_or_default();
+            let seed_target_aligned =
+                !minimal_seed_file.is_empty() && minimal_seed_file == target_symbol_file;
+            let mut with_prompt_light =
+                build_light_prompt_from_refs(&base_prompt, &delta_refs, delta_refs.len());
+            if autoroute_first
+                && task.requires_code_change
+                && !minimal_raw_seed.is_empty()
+                && !delta_refs.is_empty()
+                && seed_target_aligned
+            {
                 with_prompt_light = format!(
                     "Structured context refs (delta from previous step):\n{}\n\nMinimal raw seed (autoroute):\n{}\n\nTask:\n{}",
                     serde_json::to_string_pretty(&delta_refs).unwrap_or_default(),
@@ -831,70 +863,113 @@ impl RetrievalService {
                     > (a_tokens.max(1) as f32 * tuning.guardrail_ratio)
             {
                 refs_used -= 1;
-                with_prompt_light = build_light_prompt_from_refs(&base_prompt, &delta_refs, refs_used);
+                with_prompt_light =
+                    build_light_prompt_from_refs(&base_prompt, &delta_refs, refs_used);
             }
+            let with_prompt_heavy = if task.requires_code_change && !raw_code_context.is_empty() {
+                format!(
+                    "Structured context refs (delta from previous step):\n{}\n\nRaw code context (auto included for edit tasks):\n{}\n\nTask:\n{}",
+                    serde_json::to_string_pretty(
+                        &delta_refs
+                            .iter()
+                            .take(refs_used)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_default(),
+                    raw_code_context,
+                    base_prompt
+                )
+            } else {
+                String::new()
+            };
+            let heavy_prompt_over_guardrail = !with_prompt_heavy.is_empty()
+                && (estimate_tokens(&with_prompt_heavy) as f32)
+                    > (a_tokens.max(1) as f32 * tuning.guardrail_ratio);
+            let prefer_heavy_first = task.requires_code_change
+                && refs_used == 0
+                && !with_prompt_heavy.is_empty()
+                && !heavy_prompt_over_guardrail;
+            if prefer_heavy_first {
+                heavy_first_tasks += 1;
+            }
+            let with_prompt_initial = if prefer_heavy_first {
+                with_prompt_heavy.clone()
+            } else {
+                with_prompt_light.clone()
+            };
 
             let result_b_attempt = call_live_llm_with_diagnostics(
                 &selected_provider,
                 provider_settings.get(&selected_provider),
                 route.as_ref().map(|r| r.endpoint.as_str()),
-                &with_prompt_light,
+                &with_prompt_initial,
                 700,
             );
             let result_b = result_b_attempt.as_ref().ok().cloned();
             let mut result_b_error = result_b_attempt.err();
+            let mut b_live_call_final = result_b.is_some();
 
             let (b_tokens, b_output) = result_b
                 .as_ref()
                 .map(|r| (r.total_tokens, r.text.clone()))
-                .unwrap_or((estimate_tokens(&with_prompt_light), String::new()));
+                .unwrap_or((estimate_tokens(&with_prompt_initial), String::new()));
             let a_hits = score_expected_terms(&a_output, &task.expected_terms);
             let mut b_hits = score_expected_terms(&b_output, &task.expected_terms);
             let mut b_tokens_final = b_tokens;
             let mut b_output_final = b_output.clone();
-            let mut with_prompt_final = with_prompt_light.clone();
+            let mut with_prompt_final = with_prompt_initial.clone();
             let mut escalation_used = false;
             let mut guardrail_applied = false;
+            let mut semantic_route = if prefer_heavy_first {
+                "heavy_first".to_string()
+            } else {
+                "light_first".to_string()
+            };
 
-            if task.requires_code_change
+            if !prefer_heavy_first
+                && task.requires_code_change
                 && b_hits < tuning.escalation_hits_threshold
-                && !raw_code_context.is_empty()
+                && !with_prompt_heavy.is_empty()
             {
+                escalation_attempts += 1;
                 escalation_used = true;
-                let with_prompt_heavy = format!(
-                    "Structured context refs (delta from previous step):\n{}\n\nRaw code context (auto included for edit tasks):\n{}\n\nTask:\n{}",
-                    serde_json::to_string_pretty(&delta_refs.iter().take(refs_used).cloned().collect::<Vec<_>>()).unwrap_or_default(),
-                    raw_code_context,
-                    base_prompt
-                );
-                if (estimate_tokens(&with_prompt_heavy) as f32)
-                    > (a_tokens.max(1) as f32 * tuning.guardrail_ratio)
-                {
+                if heavy_prompt_over_guardrail {
                     guardrail_applied = true;
+                    escalation_guardrail_skips += 1;
+                    semantic_route = "light_retained_guardrail".to_string();
                 } else {
-                let result_b_heavy_attempt = call_live_llm_with_diagnostics(
-                    &selected_provider,
-                    provider_settings.get(&selected_provider),
-                    route.as_ref().map(|r| r.endpoint.as_str()),
-                    &with_prompt_heavy,
-                    700,
-                );
-                let result_b_heavy = result_b_heavy_attempt.as_ref().ok().cloned();
-                let (heavy_tokens, heavy_output) = result_b_heavy
-                    .as_ref()
-                    .map(|r| (r.total_tokens, r.text.clone()))
-                    .unwrap_or((estimate_tokens(&with_prompt_heavy), String::new()));
-                if result_b_heavy.is_none() {
-                    result_b_error = result_b_heavy_attempt.err();
+                    let result_b_heavy_attempt = call_live_llm_with_diagnostics(
+                        &selected_provider,
+                        provider_settings.get(&selected_provider),
+                        route.as_ref().map(|r| r.endpoint.as_str()),
+                        &with_prompt_heavy,
+                        700,
+                    );
+                    let result_b_heavy = result_b_heavy_attempt.as_ref().ok().cloned();
+                    let (heavy_tokens, heavy_output) = result_b_heavy
+                        .as_ref()
+                        .map(|r| (r.total_tokens, r.text.clone()))
+                        .unwrap_or((estimate_tokens(&with_prompt_heavy), String::new()));
+                    if result_b_heavy.is_none() {
+                        result_b_error = result_b_heavy_attempt.err();
+                    } else {
+                        b_live_call_final = true;
+                    }
+                    let heavy_hits = score_expected_terms(&heavy_output, &task.expected_terms);
+                    if heavy_hits >= b_hits {
+                        b_hits = heavy_hits;
+                        b_output_final = heavy_output;
+                        with_prompt_final = with_prompt_heavy;
+                        b_tokens_final = heavy_tokens;
+                        semantic_route = "escalated_heavy".to_string();
+                    } else {
+                        semantic_route = "light_retained_after_escalation".to_string();
+                    }
                 }
-                b_tokens_final += heavy_tokens;
-                let heavy_hits = score_expected_terms(&heavy_output, &task.expected_terms);
-                if heavy_hits >= b_hits {
-                    b_hits = heavy_hits;
-                    b_output_final = heavy_output;
-                    with_prompt_final = with_prompt_heavy;
-                }
-                }
+            }
+            if with_prompt_final.len() > without_prompt.len() {
+                semantic_prompt_over_control_count += 1;
             }
             let task_savings_pct = if a_tokens == 0 {
                 0.0
@@ -916,11 +991,9 @@ impl RetrievalService {
                 total_steps_without += steps;
                 step_success_without += 1;
             }
-            if let Some(steps) = estimate_steps_with_semantic(
-                success_with,
-                impacted_file_count.max(1),
-                b_hits,
-            ) {
+            if let Some(steps) =
+                estimate_steps_with_semantic(success_with, impacted_file_count.max(1), b_hits)
+            {
                 total_steps_with += steps;
                 step_success_with += 1;
             }
@@ -937,6 +1010,8 @@ impl RetrievalService {
                 "semantic_features": task.semantic_features.clone(),
                 "semantic_query": task.semantic_query,
                 "target_symbol": task.target_symbol,
+                "planned_target_symbol": planned_target_symbol,
+                "target_match": target_match,
                 "autoroute_first": autoroute_first,
                 "tokens_without_semantic": a_tokens,
                 "tokens_with_semantic": b_tokens_final,
@@ -945,8 +1020,12 @@ impl RetrievalService {
                 "live_call_error_with_semantic": result_b_error,
                 "escalation_used": escalation_used,
                 "guardrail_applied": guardrail_applied,
+                "seed_target_aligned": seed_target_aligned,
+                "semantic_route": semantic_route,
                 "light_ref_count_used": refs_used,
                 "control_attachment_chars": control_attachment_context.len(),
+                "semantic_prompt_chars": with_prompt_final.len(),
+                "control_prompt_chars": without_prompt.len(),
                 "success_without_semantic": success_without,
                 "success_with_semantic": success_with
             });
@@ -968,7 +1047,7 @@ impl RetrievalService {
                 },
                 "with_semantic": {
                     "tokens": b_tokens_final,
-                    "live_call": result_b.is_some(),
+                    "live_call": b_live_call_final,
                     "live_call_error": result_b_error,
                     "expected_term_hits": b_hits,
                     "prompt": with_prompt_final,
@@ -978,8 +1057,14 @@ impl RetrievalService {
                 "semantic_features": task.semantic_features.clone(),
                 "escalation_used": escalation_used,
                 "guardrail_applied": guardrail_applied,
+                "semantic_route": semantic_route,
+                "planned_target_symbol": planned_target_symbol,
+                "target_match": target_match,
+                "seed_target_aligned": seed_target_aligned,
                 "light_ref_count_used": refs_used,
                 "control_attachment_chars": control_attachment_context.len(),
+                "semantic_prompt_chars": with_prompt_final.len(),
+                "control_prompt_chars": without_prompt.len(),
                 "control_attachment_files": task
                     .context_ranges
                     .iter()
@@ -1009,6 +1094,14 @@ impl RetrievalService {
             ((total_steps_without as f32 - total_steps_with as f32) / total_steps_without as f32)
                 * 100.0
         };
+        let target_match_pct = (target_match_count as f32 / task_count_f) * 100.0;
+        let empty_ref_pct = (empty_ref_tasks as f32 / task_count_f) * 100.0;
+        let heavy_first_pct = (heavy_first_tasks as f32 / task_count_f) * 100.0;
+        let semantic_prompt_over_control_pct =
+            (semantic_prompt_over_control_count as f32 / task_count_f) * 100.0;
+        let escalation_attempt_pct = (escalation_attempts as f32 / task_count_f) * 100.0;
+        let escalation_guardrail_skip_pct =
+            (escalation_guardrail_skips as f32 / task_count_f) * 100.0;
 
         append_ab_test_csv(
             &self.repo_root,
@@ -1051,6 +1144,20 @@ impl RetrievalService {
             "primary_metric": "fewest_total_steps_to_successful_code_change",
             "semantic_execution_success_count": semantic_exec_success,
             "semantic_execution_success_pct": semantic_exec_pct,
+            "gating_metrics": {
+                "target_match_count": target_match_count,
+                "target_match_pct": target_match_pct,
+                "empty_ref_tasks": empty_ref_tasks,
+                "empty_ref_pct": empty_ref_pct,
+                "heavy_first_tasks": heavy_first_tasks,
+                "heavy_first_pct": heavy_first_pct,
+                "semantic_prompt_over_control_count": semantic_prompt_over_control_count,
+                "semantic_prompt_over_control_pct": semantic_prompt_over_control_pct,
+                "escalation_attempts": escalation_attempts,
+                "escalation_attempt_pct": escalation_attempt_pct,
+                "escalation_guardrail_skips": escalation_guardrail_skips,
+                "escalation_guardrail_skip_pct": escalation_guardrail_skip_pct,
+            },
             "task_results": task_results,
         }))
     }
@@ -1189,7 +1296,12 @@ impl RetrievalService {
         Ok(json!({ "name": name, "dependencies": deps }))
     }
 
-    fn get_code_span(&self, file: &str, start_line: u32, end_line: u32) -> Result<serde_json::Value> {
+    fn get_code_span(
+        &self,
+        file: &str,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<serde_json::Value> {
         let code = read_span(&self.repo_root, file, start_line, end_line)?;
         Ok(json!({
             "file": file,
@@ -1246,7 +1358,11 @@ impl RetrievalService {
         }))
     }
 
-    fn get_dependency_neighborhood(&self, symbol_name: &str, radius: usize) -> Result<serde_json::Value> {
+    fn get_dependency_neighborhood(
+        &self,
+        symbol_name: &str,
+        radius: usize,
+    ) -> Result<serde_json::Value> {
         let symbol = self
             .storage
             .get_symbol_any(symbol_name)?
@@ -1264,7 +1380,11 @@ impl RetrievalService {
         }))
     }
 
-    fn get_symbol_neighborhood(&self, symbol_name: &str, radius: usize) -> Result<serde_json::Value> {
+    fn get_symbol_neighborhood(
+        &self,
+        symbol_name: &str,
+        radius: usize,
+    ) -> Result<serde_json::Value> {
         let symbol = self
             .storage
             .get_symbol_any(symbol_name)?
@@ -1342,8 +1462,14 @@ impl RetrievalService {
         logic_spans.sort_by(|a, b| {
             let af = a.get("file").and_then(|v| v.as_str()).unwrap_or_default();
             let bf = b.get("file").and_then(|v| v.as_str()).unwrap_or_default();
-            let as_line = a.get("start_line").and_then(|v| v.as_u64()).unwrap_or_default();
-            let bs_line = b.get("start_line").and_then(|v| v.as_u64()).unwrap_or_default();
+            let as_line = a
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            let bs_line = b
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
             af.cmp(bf).then_with(|| as_line.cmp(&bs_line))
         });
 
@@ -1397,10 +1523,12 @@ impl RetrievalService {
         max_tokens: usize,
         single_file_fast_path: bool,
         include_raw_code_override: Option<bool>,
+        preferred_symbol: Option<&str>,
     ) -> Result<serde_json::Value> {
         let include_raw_code = include_raw_code_override.unwrap_or(false);
+        let preferred_symbol_key = preferred_symbol.unwrap_or("");
         let cache_key = format!(
-            "planned::{query}::{max_tokens}::{single_file_fast_path}::{include_raw_code}"
+            "planned::{query}::{max_tokens}::{single_file_fast_path}::{include_raw_code}::{preferred_symbol_key}"
         );
         if let Some(cached) = self.try_get_cached_context(&cache_key, 3600) {
             let mut perf = self.perf_stats.lock().expect("perf lock");
@@ -1436,7 +1564,13 @@ impl RetrievalService {
         let planner = Planner::new();
         let intent = planner.detect_intent(query);
         let plan = planner
-            .build_plan_with_modules(query, &symbol_names, &symbol_to_module, &named_module_deps)
+            .build_plan_with_modules_and_hint(
+                query,
+                &symbol_names,
+                &symbol_to_module,
+                &named_module_deps,
+                preferred_symbol,
+            )
             .ok_or_else(|| anyhow!("unable to determine target symbol from query"))?;
 
         let target_symbol = self
@@ -1446,8 +1580,8 @@ impl RetrievalService {
         let target_id = target_symbol
             .id
             .ok_or_else(|| anyhow!("target symbol id missing"))?;
-        let (effective_logic_radius, effective_dependency_radius, breadth) =
-            self.optimize_retrieval_breadth(
+        let (effective_logic_radius, effective_dependency_radius, breadth) = self
+            .optimize_retrieval_breadth(
                 target_id,
                 plan.logic_radius,
                 plan.dependency_radius,
@@ -1506,11 +1640,18 @@ impl RetrievalService {
                 .get(&target_symbol.file)
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string()),
-            module_rank: module_rank_for_file(&file_to_module, &plan.scoped_modules, &target_symbol.file),
+            module_rank: module_rank_for_file(
+                &file_to_module,
+                &plan.scoped_modules,
+                &target_symbol.file,
+            ),
             start_line: target_symbol.start_line as usize,
             end_line: target_symbol.end_line as usize,
             priority: 0,
-            text: estimated_text(target_symbol.start_line as usize, target_symbol.end_line as usize),
+            text: estimated_text(
+                target_symbol.start_line as usize,
+                target_symbol.end_line as usize,
+            ),
         });
 
         let mut logic_nodes = self.storage.get_logic_nodes(target_id)?;
@@ -1518,8 +1659,11 @@ impl RetrievalService {
         let mut logic_context = Vec::new();
         for node in &logic_nodes {
             if let Some(node_id) = node.id {
-                logic_context
-                    .append(&mut self.storage.get_logic_neighbors(node_id, effective_logic_radius)?);
+                logic_context.append(
+                    &mut self
+                        .storage
+                        .get_logic_neighbors(node_id, effective_logic_radius)?,
+                );
             }
         }
         logic_context.sort_by_key(|n| (n.id.unwrap_or_default(), n.start_line, n.end_line));
@@ -1535,7 +1679,11 @@ impl RetrievalService {
                             .get(&file)
                             .cloned()
                             .unwrap_or_else(|| "unknown".to_string()),
-                        module_rank: module_rank_for_file(&file_to_module, &plan.scoped_modules, &file),
+                        module_rank: module_rank_for_file(
+                            &file_to_module,
+                            &plan.scoped_modules,
+                            &file,
+                        ),
                         start_line: node.start_line,
                         end_line: node.end_line,
                         priority: 1,
@@ -1556,7 +1704,11 @@ impl RetrievalService {
                         .get(&dep.file)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string()),
-                    module_rank: module_rank_for_file(&file_to_module, &plan.scoped_modules, &dep.file),
+                    module_rank: module_rank_for_file(
+                        &file_to_module,
+                        &plan.scoped_modules,
+                        &dep.file,
+                    ),
                     start_line: dep.start_line as usize,
                     end_line: dep.end_line as usize,
                     priority: 2,
@@ -1582,7 +1734,11 @@ impl RetrievalService {
                         .get(&dep.file)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string()),
-                    module_rank: module_rank_for_file(&file_to_module, &plan.scoped_modules, &dep.file),
+                    module_rank: module_rank_for_file(
+                        &file_to_module,
+                        &plan.scoped_modules,
+                        &dep.file,
+                    ),
                     start_line: dep.start_line as usize,
                     end_line: dep.end_line as usize,
                     priority: 3,
@@ -1613,10 +1769,7 @@ impl RetrievalService {
         };
         let selected = select_with_budget(context_items, &budget);
 
-        let mut raw_budget_chars = max_tokens
-            .saturating_mul(4)
-            .saturating_sub(1600)
-            .max(800);
+        let mut raw_budget_chars = max_tokens.saturating_mul(4).saturating_sub(1600).max(800);
         let assembled: Vec<serde_json::Value> = selected
             .into_iter()
             .map(|item| {
@@ -1684,6 +1837,7 @@ impl RetrievalService {
             max_tokens,
             single_file_fast_path,
             include_raw_code_override,
+            None,
         )?;
         Ok(json!({
             "workspace_repositories": repositories,
@@ -1697,16 +1851,36 @@ impl RetrievalService {
         task_query: &str,
         max_tokens: usize,
         single_file_fast_path: bool,
+        preferred_symbol: Option<&str>,
     ) -> Result<serde_json::Value> {
-        let mut planned =
-            self.get_planned_context(task_query, max_tokens, single_file_fast_path, Some(false))?;
-        let first = planned
-            .get("context")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .cloned();
-        if let Some(first_ctx) = first {
-            let file = first_ctx.get("file").and_then(|v| v.as_str()).unwrap_or_default();
+        let mut planned = self.get_planned_context(
+            task_query,
+            max_tokens,
+            single_file_fast_path,
+            Some(false),
+            preferred_symbol,
+        )?;
+        let seed_ctx = preferred_symbol
+            .and_then(|s| self.storage.get_symbol_any(s).ok().flatten())
+            .map(|sym| {
+                json!({
+                    "file": sym.file,
+                    "start": sym.start_line,
+                    "end": sym.end_line,
+                })
+            })
+            .or_else(|| {
+                planned
+                    .get("context")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .cloned()
+            });
+        if let Some(first_ctx) = seed_ctx {
+            let file = first_ctx
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let start = first_ctx
                 .get("start")
                 .and_then(|v| v.as_u64())
@@ -1759,7 +1933,14 @@ impl RetrievalService {
 
         let branch_like = nodes
             .iter()
-            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Conditional | engine::LogicNodeType::Switch | engine::LogicNodeType::Case))
+            .filter(|n| {
+                matches!(
+                    n.node_type,
+                    engine::LogicNodeType::Conditional
+                        | engine::LogicNodeType::Switch
+                        | engine::LogicNodeType::Case
+                )
+            })
             .count();
         let loop_like = nodes
             .iter()
@@ -1793,14 +1974,20 @@ impl RetrievalService {
             .count();
         let calls = nodes
             .iter()
-            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Call | engine::LogicNodeType::Await))
+            .filter(|n| {
+                matches!(
+                    n.node_type,
+                    engine::LogicNodeType::Call | engine::LogicNodeType::Await
+                )
+            })
             .count();
         let returns = nodes
             .iter()
             .filter(|n| matches!(n.node_type, engine::LogicNodeType::Return))
             .count();
 
-        let code = read_span(&self.repo_root, &sym.file, sym.start_line, sym.end_line).unwrap_or_default();
+        let code =
+            read_span(&self.repo_root, &sym.file, sym.start_line, sym.end_line).unwrap_or_default();
         let mut identifier_freq: HashMap<String, usize> = HashMap::new();
         for token in code
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
@@ -1835,18 +2022,24 @@ impl RetrievalService {
         single_file_fast_path: bool,
     ) -> Result<serde_json::Value> {
         let planned =
-            self.get_planned_context(query, max_tokens, single_file_fast_path, Some(false))?;
+            self.get_planned_context(query, max_tokens, single_file_fast_path, Some(false), None)?;
         let symbol = planned
             .get("symbol")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
         if symbol.is_empty() {
-            return Ok(json!({ "query": query, "ranked_context": [], "strategy": "hybrid_ranked_context" }));
+            return Ok(
+                json!({ "query": query, "ranked_context": [], "strategy": "hybrid_ranked_context" }),
+            );
         }
 
-        let control = self.get_control_flow_hints(&symbol).unwrap_or_else(|_| json!({}));
-        let data = self.get_data_flow_hints(&symbol).unwrap_or_else(|_| json!({}));
+        let control = self
+            .get_control_flow_hints(&symbol)
+            .unwrap_or_else(|_| json!({}));
+        let data = self
+            .get_data_flow_hints(&symbol)
+            .unwrap_or_else(|_| json!({}));
 
         let mut ranked_context = planned
             .get("context")
@@ -1858,7 +2051,10 @@ impl RetrievalService {
             let mut score = 100i64;
             let priority = item.get("priority").and_then(|v| v.as_i64()).unwrap_or(3);
             score -= priority * 10;
-            let raw_included = item.get("raw_included").and_then(|v| v.as_bool()).unwrap_or(false);
+            let raw_included = item
+                .get("raw_included")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if raw_included {
                 score += 5;
             }
@@ -1867,8 +2063,14 @@ impl RetrievalService {
             }
         }
         ranked_context.sort_by(|a, b| {
-            let ascore = a.get("hybrid_score").and_then(|v| v.as_i64()).unwrap_or_default();
-            let bscore = b.get("hybrid_score").and_then(|v| v.as_i64()).unwrap_or_default();
+            let ascore = a
+                .get("hybrid_score")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default();
+            let bscore = b
+                .get("hybrid_score")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default();
             bscore.cmp(&ascore)
         });
 
@@ -2007,28 +2209,25 @@ impl RetrievalService {
             &patch_memory,
         )?;
 
-        let policy_config = std::fs::read_to_string(
-            self.repo_root.join(".semantic").join("policies.toml"),
-        )
-        .unwrap_or_default();
+        let policy_config =
+            std::fs::read_to_string(self.repo_root.join(".semantic").join("policies.toml"))
+                .unwrap_or_default();
         let policies = policy_engine::PolicyEngine::from_toml(&policy_config)?;
         policies.validate_edit_plan(&plan)?;
 
-        let routing_cfg = std::fs::read_to_string(
-            self.repo_root.join(".semantic").join("llm_routing.toml"),
-        )
-        .unwrap_or_default();
-        let providers_cfg = std::fs::read_to_string(
-            self.repo_root.join(".semantic").join("llm_config.toml"),
-        )
-        .unwrap_or_default();
-        let metrics_json = std::fs::read_to_string(
-            self.repo_root.join(".semantic").join("model_metrics.json"),
-        )
-        .unwrap_or_else(|_| "{}".to_string());
+        let routing_cfg =
+            std::fs::read_to_string(self.repo_root.join(".semantic").join("llm_routing.toml"))
+                .unwrap_or_default();
+        let providers_cfg =
+            std::fs::read_to_string(self.repo_root.join(".semantic").join("llm_config.toml"))
+                .unwrap_or_default();
+        let metrics_json =
+            std::fs::read_to_string(self.repo_root.join(".semantic").join("model_metrics.json"))
+                .unwrap_or_else(|_| "{}".to_string());
         let history_perf = patch_memory.model_performance(&patch_memory::PatchQuery::default())?;
         let merged_metrics = merge_metrics_json(&metrics_json, &history_perf);
-        let router = llm_router::LLMRouter::from_files(&providers_cfg, &routing_cfg, &merged_metrics)?;
+        let router =
+            llm_router::LLMRouter::from_files(&providers_cfg, &routing_cfg, &merged_metrics)?;
         let route = router.route(llm_router::LLMTask::CodeExecution);
         let provider_settings = parse_provider_settings(&providers_cfg);
         let live_llm_result = route.as_ref().and_then(|selected| {
@@ -2063,10 +2262,9 @@ impl RetrievalService {
         };
 
         let application_mode = patch_mode.unwrap_or(engine::PatchApplicationMode::Confirm);
-        let validation_cfg = std::fs::read_to_string(
-            self.repo_root.join(".semantic").join("validation.toml"),
-        )
-        .unwrap_or_default();
+        let validation_cfg =
+            std::fs::read_to_string(self.repo_root.join(".semantic").join("validation.toml"))
+                .unwrap_or_default();
 
         let (provider, model_used) = route
             .as_ref()
@@ -2079,7 +2277,9 @@ impl RetrievalService {
             })
             .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
         let ast_transform = match &patch.representation {
-            engine::PatchRepresentation::ASTTransform(ast_edit) => Some(ast_edit.transformation.clone()),
+            engine::PatchRepresentation::ASTTransform(ast_edit) => {
+                Some(ast_edit.transformation.clone())
+            }
             engine::PatchRepresentation::UnifiedDiff(_) => None,
         };
         let now = std::time::SystemTime::now()
@@ -2230,7 +2430,12 @@ fn parse_provider_settings(config: &str) -> HashMap<String, ProviderSetting> {
     for raw in config.lines() {
         let line = raw.trim();
         if line.starts_with('[') && line.ends_with(']') {
-            flush(&current_provider, &current_model, &current_api_key_env, &mut out);
+            flush(
+                &current_provider,
+                &current_model,
+                &current_api_key_env,
+                &mut out,
+            );
             current_model = None;
             current_api_key_env = None;
             if line.starts_with("[provider_settings.") && line.ends_with(']') {
@@ -2257,7 +2462,12 @@ fn parse_provider_settings(config: &str) -> HashMap<String, ProviderSetting> {
             }
         }
     }
-    flush(&current_provider, &current_model, &current_api_key_env, &mut out);
+    flush(
+        &current_provider,
+        &current_model,
+        &current_api_key_env,
+        &mut out,
+    );
     out
 }
 
@@ -2358,8 +2568,8 @@ fn call_live_llm_with_diagnostics(
         .api_key_env
         .clone()
         .ok_or_else(|| format!("provider '{provider}' missing api_key_env setting"))?;
-    let api_key = std::env::var(&api_key_env)
-        .map_err(|_| format!("missing env var: {api_key_env}"))?;
+    let api_key =
+        std::env::var(&api_key_env).map_err(|_| format!("missing env var: {api_key_env}"))?;
     if api_key.trim().is_empty() {
         return Err(format!("empty env var: {api_key_env}"));
     }
@@ -2604,10 +2814,19 @@ fn build_context_payload(planned_context: &serde_json::Value, max_chars: usize) 
         if out.len() >= max_chars {
             break;
         }
-        let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let start = item.get("start").and_then(|v| v.as_u64()).unwrap_or_default();
+        let file = item
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let start = item
+            .get("start")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default();
         let end = item.get("end").and_then(|v| v.as_u64()).unwrap_or_default();
-        let code = item.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+        let code = item
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let trimmed = if code.len() > 700 {
             format!("{}...", &code[..700])
         } else {
@@ -2746,13 +2965,6 @@ fn build_structured_context_refs(
         .unwrap_or_default()
 }
 
-fn context_ref_key(item: &serde_json::Value) -> String {
-    let file = item.get("file").and_then(|v| v.as_str()).unwrap_or_default();
-    let start = item.get("start").and_then(|v| v.as_u64()).unwrap_or_default();
-    let end = item.get("end").and_then(|v| v.as_u64()).unwrap_or_default();
-    format!("{file}:{start}-{end}")
-}
-
 fn context_tuning_for_task(
     task: &ABDevTask,
     impacted_file_count: usize,
@@ -2791,7 +3003,11 @@ fn context_tuning_for_task(
     }
 }
 
-fn build_light_prompt_from_refs(base_prompt: &str, refs: &[serde_json::Value], count: usize) -> String {
+fn build_light_prompt_from_refs(
+    base_prompt: &str,
+    refs: &[serde_json::Value],
+    count: usize,
+) -> String {
     if refs.is_empty() || count == 0 {
         return base_prompt.to_string();
     }
@@ -2805,7 +3021,10 @@ fn build_light_prompt_from_refs(base_prompt: &str, refs: &[serde_json::Value], c
 
 fn score_expected_terms(output: &str, terms: &[&str]) -> usize {
     let output_lc = output.to_lowercase();
-    terms.iter().filter(|t| output_lc.contains(&t.to_lowercase())).count()
+    terms
+        .iter()
+        .filter(|t| output_lc.contains(&t.to_lowercase()))
+        .count()
 }
 
 fn estimate_steps_without_semantic(success: bool, output: &str) -> Option<usize> {
@@ -2837,26 +3056,11 @@ fn ensure_todo_ab_project(repo_root: &Path) -> Result<()> {
     fs::create_dir_all(&base)?;
 
     let files = [
-        (
-            base.join("types.ts"),
-            TODO_TYPES_TS,
-        ),
-        (
-            base.join("taskStore.ts"),
-            TODO_TASK_STORE_TS,
-        ),
-        (
-            base.join("taskService.ts"),
-            TODO_TASK_SERVICE_TS,
-        ),
-        (
-            base.join("menu.tsx"),
-            TODO_MENU_TSX,
-        ),
-        (
-            base.join("app.tsx"),
-            TODO_APP_TSX,
-        ),
+        (base.join("types.ts"), TODO_TYPES_TS),
+        (base.join("taskStore.ts"), TODO_TASK_STORE_TS),
+        (base.join("taskService.ts"), TODO_TASK_SERVICE_TS),
+        (base.join("menu.tsx"), TODO_MENU_TSX),
+        (base.join("app.tsx"), TODO_APP_TSX),
     ];
 
     for (path, content) in files {
@@ -3308,10 +3512,7 @@ fn current_ts() -> u64 {
         .unwrap_or_default()
 }
 
-fn merge_metrics_json(
-    base_metrics_json: &str,
-    performance: &[engine::ModelPerformance],
-) -> String {
+fn merge_metrics_json(base_metrics_json: &str, performance: &[engine::ModelPerformance]) -> String {
     let mut base: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str::<serde_json::Value>(base_metrics_json)
             .ok()
@@ -3319,9 +3520,7 @@ fn merge_metrics_json(
             .unwrap_or_default();
 
     for perf in performance {
-        let entry = base
-            .entry(perf.model.clone())
-            .or_insert_with(|| json!({}));
+        let entry = base.entry(perf.model.clone()).or_insert_with(|| json!({}));
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("success_rate".to_string(), json!(perf.success_rate));
             if !obj.contains_key("latency_ms") {
@@ -3360,7 +3559,8 @@ fn estimate_evolution_risk(
         1.0 - (test_files as f32 / file_count as f32)
     };
 
-    let risk_score = (failure_rate * 0.5) + ((impacted_files / 100.0).min(1.0) * 0.3) + (coverage_signal * 0.2);
+    let risk_score =
+        (failure_rate * 0.5) + ((impacted_files / 100.0).min(1.0) * 0.3) + (coverage_signal * 0.2);
     Ok(engine::EvolutionRisk {
         risk_score,
         reasoning: format!(
@@ -3390,7 +3590,9 @@ fn module_rank_for_file(
 }
 
 fn planned_context_cache_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".semantic").join("planned_context_cache.json")
+    repo_root
+        .join(".semantic")
+        .join("planned_context_cache.json")
 }
 
 fn load_planned_context_cache(repo_root: &Path) -> HashMap<String, CachedContext> {
@@ -3425,7 +3627,12 @@ fn current_index_revision(repo_root: &Path) -> u64 {
         .unwrap_or_default()
 }
 
-fn read_span(repo_root: &Path, relative_file: &str, start_line: u32, end_line: u32) -> Result<String> {
+fn read_span(
+    repo_root: &Path,
+    relative_file: &str,
+    start_line: u32,
+    end_line: u32,
+) -> Result<String> {
     let full_path = repo_root.join(relative_file);
     let content = fs::read_to_string(full_path)?;
     let mut out = Vec::new();
@@ -3443,7 +3650,9 @@ fn read_span(repo_root: &Path, relative_file: &str, start_line: u32, end_line: u
 #[cfg(test)]
 mod tests {
     use super::RetrievalService;
-    use engine::{LogicNodeRecord, LogicNodeType, Operation, RetrievalRequest, SymbolRecord, SymbolType};
+    use engine::{
+        LogicNodeRecord, LogicNodeType, Operation, RetrievalRequest, SymbolRecord, SymbolType,
+    };
     use std::fs;
     use storage::Storage;
 
@@ -3506,9 +3715,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("get function");
 
@@ -3587,9 +3796,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("logic nodes");
 
@@ -3729,9 +3938,9 @@ mod tests {
                 logic_radius: Some(1),
                 dependency_radius: Some(2),
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("reasoning context");
 
@@ -3849,9 +4058,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("dependency neighborhood");
         let deps = deps_resp
@@ -3877,9 +4086,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("symbol neighborhood");
         let order = symbol_resp
@@ -3968,9 +4177,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("planned context");
 
@@ -4073,9 +4282,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("planned context");
 
@@ -4195,9 +4404,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("repo hierarchy");
         let modules = hierarchy
@@ -4223,9 +4432,9 @@ mod tests {
                 logic_radius: None,
                 dependency_radius: None,
                 workspace_scope: None,
-            edit_description: None,
-            patch_mode: None,
-            run_tests: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("module dependencies");
         let edges = module_deps
@@ -4375,13 +4584,3 @@ mod tests {
         assert!(!repos.is_empty());
     }
 }
-
-
-
-
-
-
-
-
-
-

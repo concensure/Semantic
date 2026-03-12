@@ -184,6 +184,25 @@ Mitigations implemented:
 - adaptive retrieval breadth (`effective_breadth`) based on fanout, logic density, and token budget
 - bounded response shapes (no forced expansion of extra raw files)
 
+Additional A/B hardening updates (2026-03-13):
+
+- planner now supports target symbol hints and normalized symbol matching
+  - e.g., spaced query terms can resolve camelCase symbols more reliably
+- autoroute minimal raw seed is constrained to target-aligned spans
+- A/B semantic arm uses per-task refs (not cross-task ref suppression)
+- escalation uses replacement-style selection for token accounting
+  - if heavy context wins quality, heavy path becomes the counted path
+- `/ab_test_dev` now emits richer task diagnostics:
+  - `planned_target_symbol`, `target_match`, `seed_target_aligned`
+  - `semantic_route`, `semantic_prompt_chars`, `control_prompt_chars`
+  - suite-level `gating_metrics` in response JSON
+
+Recent A/B results (todo dev suite):
+
+- prior baseline: `-18.62%` token savings
+- post-improvements runs: `+8.07%` and `+5.70%` token savings
+- task success remained `11/11` for both arms
+
 ## Discoverability
 
 Use these endpoints at runtime:

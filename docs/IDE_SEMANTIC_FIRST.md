@@ -66,6 +66,10 @@ flowchart TD
 - Sessions that reuse indexed context instead of repeatedly re-attaching raw files.
 - Planning-heavy workflows where dependency/impact context avoids broad file dumps.
 
+Recent benchmark note (2026-03-13):
+
+- After planner/autoroute hardening, the todo dev suite moved from `-18.62%` to positive token savings (`+5.70%` latest, `+8.07%` in another run) while preserving `11/11` task success in both arms.
+
 ## 5) When Token Usage Can Be Higher
 
 This can still happen after optimization:
@@ -74,6 +78,20 @@ This can still happen after optimization:
 - Overly broad retrieval settings (`limit`, `radius`, high context token budgets).
 - Repeated semantic calls when a single direct edit would be sufficient.
 - Early-session cold start where indexing and first retrieval return more structure than needed.
+
+What to monitor in `/ab_test_dev`:
+
+- `gating_metrics.target_match_pct`
+- `gating_metrics.empty_ref_pct`
+- `gating_metrics.semantic_prompt_over_control_pct`
+- `gating_metrics.escalation_attempt_pct`
+
+Healthy signals:
+
+- high `target_match_pct`
+- near-zero `empty_ref_pct`
+- low `semantic_prompt_over_control_pct`
+- low escalation rate unless tasks are genuinely cross-file/complex
 
 ## 6) Practical Policy Defaults
 

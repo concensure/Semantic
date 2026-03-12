@@ -8,6 +8,7 @@ Use the semantic-first integration guide for RooCode/KiloCode/Codex/Claude wirin
 
 - `docs/IDE_SEMANTIC_FIRST.md`
 - `docs/TOOL_CALLING_GUIDE.md` (objective + usage of API and MCP tool callings)
+- `docs/AB_TEST_DEV_RESULTS.md` (development benchmark history and latest metrics)
 
 ## Modules
 
@@ -46,6 +47,24 @@ Default retrieval behavior:
 Demo project used by the development A/B suite:
 
 - `test_repo/todo_app/`
+
+## Latest A/B Benchmark Update (2026-03-13)
+
+Recent `POST /ab_test_dev` runs with `provider=openai`, `autoroute_first=true`, and `single_file_fast_path=true`:
+
+- prior baseline: `-18.62%` token savings (`9738` -> `11551`)
+- improved run: `+8.07%` token savings (`9365` -> `8609`)
+- latest run: `+5.70%` token savings (`9749` -> `9193`)
+- task success stayed `11/11` in both control and semantic arms
+
+Core improvements now in the pipeline:
+
+- stronger planner target resolution for natural-language symbol queries
+- explicit target-symbol hinting from A/B task metadata into planning
+- target-aligned minimal raw seed for autoroute (prevents unrelated seed code)
+- per-task context refs in A/B (no cross-task ref starvation)
+- escalation routing updated to replacement-style accounting (no additive token double-charge)
+- richer A/B diagnostics (`target_match`, `semantic_route`, prompt-char deltas, gating metrics)
 
 Additional retrieval operations:
 
