@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a new capability or improvement for Semantic.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the outcome you want and why existing functionality is insufficient.
+  - type: input
+    id: problem
+    attributes:
+      label: Problem statement
+      placeholder: Cross-file edit planning still over-fetches context on medium repos
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: API/tooling/UX details if available.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Expected impact
+      options:
+        - Token savings
+        - Latency/performance
+        - Retrieval quality
+        - Editing safety
+        - Developer UX
+        - Operational reliability
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] New endpoint returns ...
+        - [ ] A/B suite shows ...
+        - [ ] Docs updated
+    validations:
+      required: true

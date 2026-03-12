@@ -29,6 +29,14 @@ cargo run -p api -- ./test_repo
 
 Service binds to `127.0.0.1:4317`.
 
+New semantic-first/IDE endpoints:
+
+- `POST /ide_autoroute`
+- `GET /performance_stats`
+- `GET /control_flow_hints?symbol=...`
+- `GET /data_flow_hints?symbol=...`
+- `POST /hybrid_ranked_context`
+
 Demo project used by the development A/B suite:
 
 - `test_repo/todo_app/`

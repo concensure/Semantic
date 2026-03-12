@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use Semantic in research or tooling evaluations, please cite it using this metadata."
+title: "Semantic Agent Cognitive Layer"
+type: software
+authors:
+  - name: "Semantic Team"
+repository-code: "https://github.com/concensure/Semantic"
+url: "https://github.com/concensure/Semantic"
+license: "Apache-2.0"
+version: "0.1.0"
+date-released: "2026-03-12"
+keywords:
+  - semantic retrieval
+  - code intelligence
+  - ai-assisted editing
+  - mcp
+  - llm tooling

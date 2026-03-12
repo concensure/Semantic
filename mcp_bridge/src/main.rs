@@ -88,14 +88,44 @@ async fn call_tool(
     }
 
     let (method, endpoint, body) = resolve_tool_request(&call.tool, call.input)?;
-    let url = format!("{}{}", state.semantic_base_url, endpoint);
+    let mut url = format!("{}{}", state.semantic_base_url, endpoint);
     let response = match method {
-        "GET" => state
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?,
+        "GET" => {
+            if let Some(serde_json::Value::Object(map)) = body.as_ref() {
+                let params: Vec<(String, String)> = map
+                    .iter()
+                    .map(|(k, v)| {
+                        let sval = v
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| v.to_string());
+                        (k.clone(), sval)
+                    })
+                    .collect();
+                if !params.is_empty() {
+                    let query = params
+                        .iter()
+                        .map(|(k, v)| {
+                            format!(
+                                "{}={}",
+                                urlencoding::encode(k),
+                                urlencoding::encode(v)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    if !query.is_empty() {
+                        url = format!("{url}?{query}");
+                    }
+                }
+            }
+            state
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
+        }
         "POST" => state
             .client
             .post(&url)
@@ -134,6 +164,11 @@ async fn list_tools() -> Json<serde_json::Value> {
         MCPToolSpec { name: "pipeline_graph", method: "GET", endpoint: "/pipeline_graph", notes: None },
         MCPToolSpec { name: "analyze_pipeline", method: "POST", endpoint: "/analyze_pipeline", notes: None },
         MCPToolSpec { name: "deployment_history", method: "GET", endpoint: "/deployment_history", notes: None },
+        MCPToolSpec { name: "performance_stats", method: "GET", endpoint: "/performance_stats", notes: None },
+        MCPToolSpec { name: "ide_autoroute", method: "POST", endpoint: "/ide_autoroute", notes: Some("semantic-first IDE entrypoint; accepts task/session_id/max_tokens/single_file_fast_path") },
+        MCPToolSpec { name: "control_flow_hints", method: "GET", endpoint: "/control_flow_hints", notes: Some("query param: symbol") },
+        MCPToolSpec { name: "data_flow_hints", method: "GET", endpoint: "/data_flow_hints", notes: Some("query param: symbol") },
+        MCPToolSpec { name: "hybrid_ranked_context", method: "POST", endpoint: "/hybrid_ranked_context", notes: None },
         MCPToolSpec { name: "ab_test_dev", method: "POST", endpoint: "/ab_test_dev", notes: Some("accepts single_file_fast_path=true|false") },
         MCPToolSpec { name: "ab_test_dev_results", method: "GET", endpoint: "/ab_test_dev", notes: None },
         MCPToolSpec { name: "get_repo_map", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
@@ -184,6 +219,11 @@ fn map_tool(name: &str) -> Result<(&'static str, &'static str), (StatusCode, Str
         "pipeline_graph" => Ok(("GET", "/pipeline_graph")),
         "analyze_pipeline" => Ok(("POST", "/analyze_pipeline")),
         "deployment_history" => Ok(("GET", "/deployment_history")),
+        "performance_stats" => Ok(("GET", "/performance_stats")),
+        "ide_autoroute" => Ok(("POST", "/ide_autoroute")),
+        "control_flow_hints" => Ok(("GET", "/control_flow_hints")),
+        "data_flow_hints" => Ok(("GET", "/data_flow_hints")),
+        "hybrid_ranked_context" => Ok(("POST", "/hybrid_ranked_context")),
         "ab_test_dev" => Ok(("POST", "/ab_test_dev")),
         "ab_test_dev_results" => Ok(("GET", "/ab_test_dev")),
         _ => Err((StatusCode::BAD_REQUEST, format!("unknown tool '{name}'"))),
