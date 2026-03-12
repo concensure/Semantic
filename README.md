@@ -2,6 +2,12 @@
 
 Local Rust service for deterministic code retrieval by symbol/code span.
 
+## IDE Semantic-First Integration
+
+Use the semantic-first integration guide for RooCode/KiloCode/Codex/Claude wiring, middleware policy controls, and end-to-end flow diagrams:
+
+- `docs/IDE_SEMANTIC_FIRST.md`
+
 ## Modules
 
 - `engine` shared contracts
@@ -21,6 +27,10 @@ cargo run -p api -- ./test_repo
 ```
 
 Service binds to `127.0.0.1:4317`.
+
+Demo project used by the development A/B suite:
+
+- `test_repo/todo_app/`
 
 Additional retrieval operations:
 

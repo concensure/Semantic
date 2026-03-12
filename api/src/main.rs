@@ -12,6 +12,7 @@ use engine::{Operation, PatchApplicationMode, RetrievalRequest, RetrievalRespons
 use indexer::Indexer;
 use parking_lot::Mutex;
 use retrieval::RetrievalService;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +23,13 @@ use watcher::RepoWatcher;
 #[derive(Clone)]
 struct AppState {
     retrieval: Arc<Mutex<RetrievalService>>,
+    semantic_middleware: Arc<Mutex<SemanticMiddlewareState>>,
+}
+
+#[derive(Default)]
+struct SemanticMiddlewareState {
+    semantic_first_enabled: bool,
+    retrieved_sessions: HashSet<String>,
 }
 
 #[tokio::main]
@@ -51,11 +59,16 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         retrieval: retrieval_service,
+        semantic_middleware: Arc::new(Mutex::new(SemanticMiddlewareState::default())),
     };
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/retrieve", post(retrieve))
+        .route("/llm_tools", get(get_llm_tools))
+        .route("/semantic_ui", get(get_semantic_ui))
+        .route("/semantic_middleware", get(get_semantic_middleware))
+        .route("/semantic_middleware", post(update_semantic_middleware))
         .route("/edit", patch(edit))
         .route("/organization_graph", get(get_organization_graph))
         .route("/service_graph", get(get_service_graph))
@@ -77,7 +90,11 @@ async fn main() -> Result<()> {
         .route("/pipeline_graph", get(get_pipeline_graph))
         .route("/analyze_pipeline", post(analyze_pipeline))
         .route("/deployment_history", get(get_deployment_history))
-        .route("/ab_test", post(run_ab_test))
+        .route("/todo/seed", post(seed_todo_tasks))
+        .route("/todo/tasks", get(get_todo_tasks))
+        .route("/ab_test_dev", get(get_ab_tests))
+        .route("/ab_test_dev", post(run_ab_test_dev))
+        .route("/env_check", get(get_env_check))
         .route("/mcp_settings_ui", get(get_mcp_settings_ui))
         .route("/mcp_settings_update", post(update_mcp_settings))
         .with_state(state);
@@ -96,9 +113,44 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn retrieve(
     State(state): State<AppState>,
-    Json(request): Json<RetrievalRequest>,
+    Json(body): Json<RetrieveRequestBody>,
 ) -> Json<serde_json::Value> {
-    let result = state.retrieval.lock().handle(request);
+    if body.semantic_enabled == Some(false) {
+        return Json(serde_json::json!({
+            "ok": true,
+            "semantic_enabled": false,
+            "skipped": true,
+            "message": "Semantic layer disabled for this request."
+        }));
+    }
+
+    let mut request = body.request;
+    if body.input_compressed == Some(true) && should_block_compressed_semantic(&request.operation) {
+        if let Some(original_query) = body.original_query {
+            if request.query.is_none() {
+                request.query = Some(original_query.clone());
+            }
+            if request.name.is_none() {
+                request.name = Some(original_query);
+            }
+        } else {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "input_compressed=true can reduce semantic retrieval precision. Send original_query or disable compression for semantic operations."
+            }));
+        }
+    }
+
+    let result = state
+        .retrieval
+        .lock()
+        .handle_with_options(request, body.single_file_fast_path);
+    if result.is_ok() {
+        if let Some(session_id) = body.session_id.as_ref() {
+            let mut middleware = state.semantic_middleware.lock();
+            middleware.retrieved_sessions.insert(session_id.clone());
+        }
+    }
     match result {
         Ok(response) => Json(success(response)),
         Err(err) => {
@@ -111,6 +163,110 @@ async fn retrieve(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RetrieveRequestBody {
+    #[serde(flatten)]
+    request: RetrievalRequest,
+    semantic_enabled: Option<bool>,
+    input_compressed: Option<bool>,
+    original_query: Option<String>,
+    single_file_fast_path: Option<bool>,
+    session_id: Option<String>,
+}
+
+fn should_block_compressed_semantic(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::SearchSymbol
+            | Operation::GetFunction
+            | Operation::GetClass
+            | Operation::GetDependencies
+            | Operation::GetLogicNodes
+            | Operation::GetDependencyNeighborhood
+            | Operation::GetSymbolNeighborhood
+            | Operation::GetReasoningContext
+            | Operation::GetPlannedContext
+            | Operation::SearchSemanticSymbol
+            | Operation::GetWorkspaceReasoningContext
+            | Operation::PlanSafeEdit
+    )
+}
+
+async fn get_llm_tools(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "result": state.retrieval.lock().get_llm_tools(),
+    }))
+}
+
+async fn get_semantic_ui() -> Html<String> {
+    Html(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"/><title>Semantic Layer UI</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px}
+textarea,input,select{width:100%;margin:6px 0 12px 0;padding:8px}
+button{padding:8px 12px;margin-right:8px}
+pre{background:#f4f4f4;padding:12px;overflow:auto;white-space:pre-wrap}
+</style>
+</head><body>
+<h2>Semantic Layer Controls</h2>
+<p>Use this UI to toggle semantic retrieval and run operations without writing raw HTTP manually.</p>
+<label>Operation</label>
+<select id="operation">
+  <option>GetPlannedContext</option>
+  <option>SearchSymbol</option>
+  <option>GetCodeSpan</option>
+  <option>GetLogicNodes</option>
+  <option>PlanSafeEdit</option>
+</select>
+<label>Name / Symbol</label><input id="name" placeholder="retryRequest"/>
+<label>Query</label><input id="query" placeholder="todo app add due date"/>
+<label>File</label><input id="file" placeholder="test_repo/todo_app/src/taskStore.ts"/>
+<label>Start line</label><input id="start" value="1"/>
+<label>End line</label><input id="end" value="40"/>
+<label>Edit description</label><input id="edit" placeholder="Add due date validation"/>
+<label>Session id (optional, required only when semantic middleware semantic-first is enabled)</label><input id="session_id" placeholder="dev-session-1"/>
+<label><input type="checkbox" id="semantic_enabled" checked/> Semantic enabled</label><br/>
+<label><input type="checkbox" id="single_file_fast_path"/> Single-file fast path</label><br/>
+<label><input type="checkbox" id="compressed"/> Input compressed</label><br/>
+<label>Original query (required when compressed semantic is used)</label><input id="original_query" placeholder="original user query"/>
+<button onclick="loadTools()">GET /llm_tools</button>
+<button onclick="sendRetrieve()">POST /retrieve</button>
+<pre id="out"></pre>
+<script>
+async function loadTools(){
+  const r=await fetch('/llm_tools'); const j=await r.json();
+  document.getElementById('out').textContent=JSON.stringify(j,null,2);
+}
+async function sendRetrieve(){
+  const body={
+    operation:document.getElementById('operation').value,
+    name:document.getElementById('name').value||null,
+    query:document.getElementById('query').value||null,
+    file:document.getElementById('file').value||null,
+    start_line:Number(document.getElementById('start').value)||null,
+    end_line:Number(document.getElementById('end').value)||null,
+    max_tokens:1800,
+    limit:20,
+    logic_radius:1,
+    dependency_radius:1,
+    edit_description:document.getElementById('edit').value||null,
+    semantic_enabled:document.getElementById('semantic_enabled').checked,
+    single_file_fast_path:document.getElementById('single_file_fast_path').checked,
+    input_compressed:document.getElementById('compressed').checked,
+    original_query:document.getElementById('original_query').value||null,
+    session_id:document.getElementById('session_id').value||null
+  };
+  const r=await fetch('/retrieve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();
+  document.getElementById('out').textContent=JSON.stringify(j,null,2);
+}
+</script>
+</body></html>"#.to_string(),
+    )
+}
+
 #[derive(serde::Deserialize)]
 struct EditRequestBody {
     symbol: String,
@@ -118,12 +274,26 @@ struct EditRequestBody {
     patch_mode: Option<PatchApplicationMode>,
     run_tests: Option<bool>,
     max_tokens: Option<usize>,
+    session_id: Option<String>,
 }
 
 async fn edit(
     State(state): State<AppState>,
     Json(body): Json<EditRequestBody>,
 ) -> Json<serde_json::Value> {
+    {
+        let middleware = state.semantic_middleware.lock();
+        if middleware.semantic_first_enabled {
+            let session_id = body.session_id.as_deref().unwrap_or_default();
+            if session_id.is_empty() || !middleware.retrieved_sessions.contains(session_id) {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": "semantic-first middleware blocked edit: call /retrieve first with a session_id, then retry /edit with the same session_id."
+                }));
+            }
+        }
+    }
+
     let request = RetrievalRequest {
         operation: Operation::PlanSafeEdit,
         name: Some(body.symbol),
@@ -147,6 +317,36 @@ async fn edit(
         Ok(response) => Json(success(response)),
         Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SemanticMiddlewareUpdate {
+    semantic_first_enabled: bool,
+}
+
+async fn get_semantic_middleware(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let middleware = state.semantic_middleware.lock();
+    Json(serde_json::json!({
+        "ok": true,
+        "semantic_first_enabled": middleware.semantic_first_enabled,
+        "tracked_sessions": middleware.retrieved_sessions.len()
+    }))
+}
+
+async fn update_semantic_middleware(
+    State(state): State<AppState>,
+    Json(body): Json<SemanticMiddlewareUpdate>,
+) -> Json<serde_json::Value> {
+    let mut middleware = state.semantic_middleware.lock();
+    middleware.semantic_first_enabled = body.semantic_first_enabled;
+    if !body.semantic_first_enabled {
+        middleware.retrieved_sessions.clear();
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "semantic_first_enabled": middleware.semantic_first_enabled,
+        "tracked_sessions": middleware.retrieved_sessions.len()
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -435,23 +635,94 @@ async fn get_deployment_history(State(state): State<AppState>) -> Json<serde_jso
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ABTestRequest {
-    prompt: String,
-    symbol: Option<String>,
-    provider: Option<String>,
+async fn get_ab_tests(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match state.retrieval.lock().get_ab_tests() {
+        Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
 }
 
-async fn run_ab_test(
+async fn get_env_check(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let repo_root = state.retrieval.lock().repo_root().to_path_buf();
+    state.retrieval.lock().load_env();
+    let env_path = repo_root.join(".semantic").join(".env");
+    let env_exists = env_path.exists();
+    let openai_set = std::env::var("OPENAI_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let anthropic_set = std::env::var("ANTHROPIC_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let openrouter_set = std::env::var("OPENROUTER_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    Json(serde_json::json!({
+        "ok": true,
+        "repo_root": repo_root,
+        "env_path": env_path,
+        "env_exists": env_exists,
+        "env": {
+            "OPENAI_API_KEY": openai_set,
+            "ANTHROPIC_API_KEY": anthropic_set,
+            "OPENROUTER_API_KEY": openrouter_set
+        }
+    }))
+}
+
+
+#[derive(Debug, serde::Deserialize)]
+struct SeedTodoRequest {
+    tasks: Vec<retrieval::TodoTask>,
+}
+
+async fn seed_todo_tasks(
     State(state): State<AppState>,
-    Json(body): Json<ABTestRequest>,
+    Json(body): Json<SeedTodoRequest>,
 ) -> Json<serde_json::Value> {
-    match state
-        .retrieval
-        .lock()
-        .run_ab_test(&body.prompt, body.symbol, body.provider)
-    {
+    match state.retrieval.lock().seed_todo_tasks(body.tasks) {
         Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
+}
+
+async fn get_todo_tasks(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match state.retrieval.lock().get_todo_tasks() {
+        Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
+}
+#[derive(Debug, serde::Deserialize)]
+struct ABTestDevRequest {
+    feature_request: Option<String>,
+    provider: Option<String>,
+    max_context_tokens: Option<usize>,
+    single_file_fast_path: Option<bool>,
+}
+
+async fn run_ab_test_dev(
+    State(state): State<AppState>,
+    Json(body): Json<ABTestDevRequest>,
+) -> Json<serde_json::Value> {
+    let feature_request = body.feature_request;
+    let provider = body.provider;
+    let max_context_tokens = body.max_context_tokens;
+    let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
+    let retrieval = state.retrieval.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        retrieval
+            .lock()
+            .run_ab_test_dev(
+                feature_request.as_deref(),
+                provider,
+                max_context_tokens,
+                single_file_fast_path,
+            )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(result)) => Json(serde_json::json!({"ok": true, "result": result})),
+        Ok(Err(err)) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
         Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
     }
 }
@@ -536,3 +807,4 @@ fn success(response: RetrievalResponse) -> serde_json::Value {
         "result": response.result,
     })
 }
+

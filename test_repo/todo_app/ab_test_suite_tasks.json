@@ -1,0 +1,145 @@
+[
+  {
+    "feature_request": "Update createTask and addTask so new tasks can include dueDate and validation.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "PlanSafeEdit",
+      "GetCodeSpan"
+    ],
+    "semantic_query": "todo app create task due date validation",
+    "target_symbol": "createTask",
+    "task_id": "T01",
+    "title": "Add due date while creating tasks"
+  },
+  {
+    "feature_request": "Implement setDueDate to update existing tasks and reject invalid dates.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetLogicNodes",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app set due date edit task",
+    "target_symbol": "setDueDate",
+    "task_id": "T02",
+    "title": "Support due date edits"
+  },
+  {
+    "feature_request": "Replace reorderPriority with deterministic HIGH/MEDIUM/LOW ordering and stable ordering by id.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetDependencyNeighborhood",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app reorder tasks by priority stable sort",
+    "target_symbol": "reorderPriority",
+    "task_id": "T03",
+    "title": "Reorder by priority"
+  },
+  {
+    "feature_request": "Allow addTask to receive tags and normalize tags to lowercase unique values.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "SearchSymbol",
+      "GetPlannedContext",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app add task tags normalize lowercase unique",
+    "target_symbol": "addTask",
+    "task_id": "T04",
+    "title": "Add tags on create"
+  },
+  {
+    "feature_request": "Implement addTag and removeTag in store with dedupe behavior and not-found safety.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetReasoningContext",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app addTag removeTag dedupe",
+    "target_symbol": "addTag",
+    "task_id": "T05",
+    "title": "Add tag mutation endpoint"
+  },
+  {
+    "feature_request": "Fix filterByTag so it matches case-insensitive tags and excludes completed tasks by default.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetLogicNodes",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app filter by tag case insensitive incomplete",
+    "target_symbol": "filterByTag",
+    "task_id": "T06",
+    "title": "Filter by tag"
+  },
+  {
+    "feature_request": "Implement listOverdueTasks using dueDate and current time injection for testability.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetCodeSpan",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app overdue tasks due date current time injection",
+    "target_symbol": "listOverdueTasks",
+    "task_id": "T07",
+    "title": "Overdue task detection"
+  },
+  {
+    "feature_request": "Wire taskService.updatePriority to call store.setPriority and return updated task.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetDependencyNeighborhood",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app update priority service to store",
+    "target_symbol": "updatePriority",
+    "task_id": "T08",
+    "title": "Propagate priority updates"
+  },
+  {
+    "feature_request": "Update listTasks to sort by priority then dueDate then createdAt.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetReasoningContext",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app list tasks sort priority due date created",
+    "target_symbol": "listTasks",
+    "task_id": "T09",
+    "title": "Task list sorting"
+  },
+  {
+    "feature_request": "Create a test checklist for add due date, reorder priority, and tag flows with edge cases.",
+    "requires_code_change": false,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetWorkspaceReasoningContext",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app e2e test checklist due date priority tags",
+    "target_symbol": "addTask",
+    "task_id": "T10",
+    "title": "End-to-end acceptance checklist"
+  },
+  {
+    "feature_request": "Add a Tools menu section for due-date filter and tag quick-actions, and wire it into app.tsx navigation.",
+    "requires_code_change": true,
+    "semantic_features": [
+      "GetPlannedContext",
+      "GetDependencyNeighborhood",
+      "PlanSafeEdit"
+    ],
+    "semantic_query": "todo app ui tools menu integrate actions app navigation",
+    "target_symbol": "TaskMenu",
+    "task_id": "T11",
+    "title": "UI integration: tools menu"
+  }
+]

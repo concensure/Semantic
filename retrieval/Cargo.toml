@@ -9,6 +9,7 @@ anyhow.workspace = true
 engine = { path = "../engine" }
 storage = { path = "../storage" }
 serde_json.workspace = true
+serde.workspace = true
 reqwest.workspace = true
 planner = { path = "../planner" }
 budgeter = { path = "../budgeter" }
