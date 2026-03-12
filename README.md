@@ -7,6 +7,7 @@ Local Rust service for deterministic code retrieval by symbol/code span.
 Use the semantic-first integration guide for RooCode/KiloCode/Codex/Claude wiring, middleware policy controls, and end-to-end flow diagrams:
 
 - `docs/IDE_SEMANTIC_FIRST.md`
+- `docs/TOOL_CALLING_GUIDE.md` (objective + usage of API and MCP tool callings)
 
 ## Modules
 
