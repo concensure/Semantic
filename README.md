@@ -37,6 +37,12 @@ New semantic-first/IDE endpoints:
 - `GET /data_flow_hints?symbol=...`
 - `POST /hybrid_ranked_context`
 
+Default retrieval behavior:
+
+- `reference_only=true` (structured references first, raw code minimized)
+- `single_file_fast_path=true` recommended for obvious single-file edits
+- adaptive retrieval breadth to avoid over-fetch on high-fanout symbols
+
 Demo project used by the development A/B suite:
 
 - `test_repo/todo_app/`

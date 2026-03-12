@@ -25,6 +25,12 @@ When enabled:
 - `PATCH /edit` requires the same `session_id` to have called `/retrieve` first.
 - If no prior retrieve exists, edit is blocked with an actionable error.
 
+Default posture in this project:
+
+- semantic-first middleware enabled by default
+- IDE entrypoint should be `POST /ide_autoroute`
+- retrieval defaults to `reference_only=true`, with minimal raw seed attached for edit tasks
+
 ## 3) Development Lifecycle Entry Points
 
 ```mermaid

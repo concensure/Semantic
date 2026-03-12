@@ -36,7 +36,8 @@ Request envelope:
   "operation": "get_planned_context",
   "query": "add due date validation",
   "semantic_enabled": true,
-  "single_file_fast_path": true
+  "single_file_fast_path": true,
+  "reference_only": true
 }
 ```
 
@@ -133,9 +134,10 @@ Common MCP tool names:
 
 IDE-native shortcut:
 
-1. Call `ide_autoroute` first with `{ task, session_id, max_tokens, single_file_fast_path }`.
+1. Call `ide_autoroute` first with `{ task, session_id, max_tokens, single_file_fast_path, reference_only }`.
 2. Use returned `selected_tool` + `result` as the first semantic context.
-3. Continue with `plan_safe_edit` / `/edit` using the same `session_id`.
+3. If editing is needed, use `result.minimal_raw_seed` (auto-filled when `reference_only=true`) as the smallest editable raw span.
+4. Continue with `plan_safe_edit` / `/edit` using the same `session_id`.
 
 ## Token Usage Guidance
 
@@ -155,6 +157,8 @@ Mitigations implemented:
 
 - planned-context cache with TTL for repeated query reuse
 - default `single_file_fast_path=true` in `ide_autoroute`
+- default `reference_only=true` in `/retrieve` and `ide_autoroute`
+- adaptive retrieval breadth (`effective_breadth`) based on fanout, logic density, and token budget
 - bounded response shapes (no forced expansion of extra raw files)
 
 ## Discoverability
