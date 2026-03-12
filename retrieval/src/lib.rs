@@ -8,10 +8,36 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
 
 pub struct RetrievalService {
     repo_root: PathBuf,
     storage: storage::Storage,
+    planned_context_cache: Mutex<HashMap<String, CachedContext>>,
+    perf_stats: Mutex<PerfStats>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedContext {
+    cached_at_epoch_s: u64,
+    value: serde_json::Value,
+}
+
+#[derive(Debug, Default)]
+struct PerfStats {
+    cache_hits: usize,
+    cache_misses: usize,
+    cache_evictions: usize,
+    op: HashMap<String, OpPerf>,
+}
+
+#[derive(Debug, Default)]
+struct OpPerf {
+    calls: usize,
+    total_ms: u128,
+    max_ms: u128,
+    samples_ms: VecDeque<u128>,
 }
 
 
@@ -51,7 +77,12 @@ struct ContextTuning {
 }
 impl RetrievalService {
     pub fn new(repo_root: PathBuf, storage: storage::Storage) -> Self {
-        Self { repo_root, storage }
+        Self {
+            repo_root,
+            storage,
+            planned_context_cache: Mutex::new(HashMap::new()),
+            perf_stats: Mutex::new(PerfStats::default()),
+        }
     }
 
     pub fn repo_root(&self) -> &Path {
@@ -95,6 +126,8 @@ impl RetrievalService {
         request: RetrievalRequest,
         single_file_fast_path: Option<bool>,
     ) -> Result<RetrievalResponse> {
+        let op_name = format!("{:?}", request.operation).to_lowercase();
+        let started = Instant::now();
         let operation = request.operation.clone();
         let result = match operation {
             Operation::GetRepoMap => self.get_repo_map()?,
@@ -213,8 +246,66 @@ impl RetrievalService {
                 )?
             }
         };
+        self.record_operation_perf(&op_name, started.elapsed().as_millis());
 
         Ok(RetrievalResponse { operation, result })
+    }
+
+    pub fn get_performance_stats(&self) -> serde_json::Value {
+        let perf = self.perf_stats.lock().expect("perf lock");
+        let op_stats: Vec<serde_json::Value> = perf
+            .op
+            .iter()
+            .map(|(name, op)| {
+                let avg_ms = if op.calls == 0 {
+                    0.0
+                } else {
+                    op.total_ms as f64 / op.calls as f64
+                };
+                let mut sorted = op.samples_ms.iter().copied().collect::<Vec<_>>();
+                sorted.sort_unstable();
+                let p95_ms = if sorted.is_empty() {
+                    0
+                } else {
+                    let idx = ((sorted.len() as f64) * 0.95).floor() as usize;
+                    sorted[idx.min(sorted.len() - 1)]
+                };
+                json!({
+                    "operation": name,
+                    "calls": op.calls,
+                    "avg_ms": avg_ms,
+                    "p95_ms": p95_ms,
+                    "max_ms": op.max_ms,
+                })
+            })
+            .collect();
+
+        json!({
+            "targets": {
+                "index_throughput_goal": "10k files under 20s (target)",
+                "symbol_lookup_latency_goal": "<10ms (target)",
+                "planned_context_p95_goal": "<60ms (target)"
+            },
+            "cache": {
+                "entries": self.planned_context_cache.lock().expect("cache lock").len(),
+                "hits": perf.cache_hits,
+                "misses": perf.cache_misses,
+                "evictions": perf.cache_evictions,
+            },
+            "operations": op_stats
+        })
+    }
+
+    fn record_operation_perf(&self, op_name: &str, elapsed_ms: u128) {
+        let mut perf = self.perf_stats.lock().expect("perf lock");
+        let entry = perf.op.entry(op_name.to_string()).or_default();
+        entry.calls += 1;
+        entry.total_ms += elapsed_ms;
+        entry.max_ms = entry.max_ms.max(elapsed_ms);
+        entry.samples_ms.push_back(elapsed_ms);
+        if entry.samples_ms.len() > 256 {
+            entry.samples_ms.pop_front();
+        }
     }
 
     pub fn get_patch_memory(
@@ -926,7 +1017,12 @@ impl RetrievalService {
                 {"name":"get_dependency_neighborhood","operation":"GetDependencyNeighborhood","purpose":"Traverse caller/callee neighborhoods.","required":["name","radius"]},
                 {"name":"get_reasoning_context","operation":"GetReasoningContext","purpose":"Fetch semantic context for planning edits.","required":["name","logic_radius","dependency_radius"]},
                 {"name":"get_planned_context","operation":"GetPlannedContext","purpose":"Build context by intent and budget.","required":["query","max_tokens"]},
-                {"name":"plan_safe_edit","operation":"PlanSafeEdit","purpose":"Generate impact-aware patch preview and policy-checked edit plan.","required":["name_or_query","edit_description"]}
+                {"name":"plan_safe_edit","operation":"PlanSafeEdit","purpose":"Generate impact-aware patch preview and policy-checked edit plan.","required":["name_or_query","edit_description"]},
+                {"name":"ide_autoroute","endpoint":"/ide_autoroute","purpose":"IDE-native semantic-first entrypoint that auto-selects first retrieval call.","required":["task"]},
+                {"name":"performance_stats","endpoint":"/performance_stats","purpose":"Runtime hardening metrics (cache hit rate, op latency, p95)."},
+                {"name":"control_flow_hints","endpoint":"/control_flow_hints","purpose":"Control-flow hints for a symbol.","required":["symbol"]},
+                {"name":"data_flow_hints","endpoint":"/data_flow_hints","purpose":"Data-flow hints for a symbol.","required":["symbol"]},
+                {"name":"hybrid_ranked_context","endpoint":"/hybrid_ranked_context","purpose":"Hybrid ranking (symbol+logic+dependency) for compact context.","required":["query"]}
             ],
             "workflow_recommendation": [
                 "Use semantic_enabled=false for pure chat or conceptual Q&A.",
@@ -1239,6 +1335,17 @@ impl RetrievalService {
         max_tokens: usize,
         single_file_fast_path: bool,
     ) -> Result<serde_json::Value> {
+        let cache_key = format!("planned::{query}::{max_tokens}::{single_file_fast_path}");
+        if let Some(cached) = self.try_get_cached_context(&cache_key, 600) {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.cache_hits += 1;
+            return Ok(cached);
+        }
+        {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.cache_misses += 1;
+        }
+
         let symbols = self.storage.list_symbols()?;
         let mut symbol_names: Vec<String> = symbols.into_iter().map(|s| s.name).collect();
         symbol_names.sort();
@@ -1291,7 +1398,7 @@ impl RetrievalService {
                 String::new()
             };
 
-            return Ok(json!({
+            let output = json!({
                 "symbol": plan.target_symbol,
                 "intent": format!("{intent:?}").to_lowercase(),
                 "plan": plan,
@@ -1311,7 +1418,10 @@ impl RetrievalService {
                     "raw_included": include_raw_code,
                     "code": target_code
                 }],
-            }));
+                "cache": { "hit": false }
+            });
+            self.store_cached_context(cache_key, output.clone(), 512);
+            return Ok(output);
         }
 
         let mut context_items = Vec::new();
@@ -1467,7 +1577,7 @@ impl RetrievalService {
             })
             .collect();
 
-        Ok(json!({
+        let output = json!({
             "symbol": plan.target_symbol,
             "intent": format!("{intent:?}").to_lowercase(),
             "plan": plan,
@@ -1475,7 +1585,10 @@ impl RetrievalService {
             "retrieval_strategy": "two_stage_rank_then_span_fetch",
             "include_raw_code": include_raw_code,
             "context": assembled,
-        }))
+            "cache": { "hit": false }
+        });
+        self.store_cached_context(cache_key, output.clone(), 512);
+        Ok(output)
     }
 
     fn get_workspace_reasoning_context(
@@ -1495,6 +1608,195 @@ impl RetrievalService {
             "workspace_scope": workspace_scope,
             "context": planned,
         }))
+    }
+
+    pub fn get_control_flow_hints(&self, symbol: &str) -> Result<serde_json::Value> {
+        let sym = self
+            .storage
+            .get_symbol_any(symbol)?
+            .ok_or_else(|| anyhow!("symbol not found: {symbol}"))?;
+        let symbol_id = sym.id.ok_or_else(|| anyhow!("symbol id missing"))?;
+        let mut nodes = self.storage.get_logic_nodes(symbol_id)?;
+        sort_logic_nodes(&mut nodes);
+
+        let edges: Vec<serde_json::Value> = nodes
+            .windows(2)
+            .filter_map(|w| {
+                let from = w.first()?.id?;
+                let to = w.get(1)?.id?;
+                Some(json!({
+                    "from_node_id": from,
+                    "to_node_id": to,
+                    "kind": "sequential_hint"
+                }))
+            })
+            .collect();
+
+        let branch_like = nodes
+            .iter()
+            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Conditional | engine::LogicNodeType::Switch | engine::LogicNodeType::Case))
+            .count();
+        let loop_like = nodes
+            .iter()
+            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Loop))
+            .count();
+
+        Ok(json!({
+            "symbol": sym.name,
+            "file": sym.file,
+            "control_flow_nodes": nodes,
+            "control_flow_edges": edges,
+            "metrics": {
+                "branch_points": branch_like,
+                "loop_points": loop_like
+            }
+        }))
+    }
+
+    pub fn get_data_flow_hints(&self, symbol: &str) -> Result<serde_json::Value> {
+        let sym = self
+            .storage
+            .get_symbol_any(symbol)?
+            .ok_or_else(|| anyhow!("symbol not found: {symbol}"))?;
+        let symbol_id = sym.id.ok_or_else(|| anyhow!("symbol id missing"))?;
+        let mut nodes = self.storage.get_logic_nodes(symbol_id)?;
+        sort_logic_nodes(&mut nodes);
+
+        let assignments = nodes
+            .iter()
+            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Assignment))
+            .count();
+        let calls = nodes
+            .iter()
+            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Call | engine::LogicNodeType::Await))
+            .count();
+        let returns = nodes
+            .iter()
+            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Return))
+            .count();
+
+        let code = read_span(&self.repo_root, &sym.file, sym.start_line, sym.end_line).unwrap_or_default();
+        let mut identifier_freq: HashMap<String, usize> = HashMap::new();
+        for token in code
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|t| t.len() >= 3)
+        {
+            let t = token.to_lowercase();
+            if t.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            *identifier_freq.entry(t).or_insert(0) += 1;
+        }
+        let mut top_identifiers = identifier_freq.into_iter().collect::<Vec<_>>();
+        top_identifiers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_identifiers.truncate(10);
+
+        Ok(json!({
+            "symbol": sym.name,
+            "file": sym.file,
+            "data_flow_hints": {
+                "assignments": assignments,
+                "calls": calls,
+                "returns": returns,
+                "top_identifiers": top_identifiers
+            }
+        }))
+    }
+
+    pub fn get_hybrid_ranked_context(
+        &self,
+        query: &str,
+        max_tokens: usize,
+        single_file_fast_path: bool,
+    ) -> Result<serde_json::Value> {
+        let planned = self.get_planned_context(query, max_tokens, single_file_fast_path)?;
+        let symbol = planned
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if symbol.is_empty() {
+            return Ok(json!({ "query": query, "ranked_context": [], "strategy": "hybrid_ranked_context" }));
+        }
+
+        let control = self.get_control_flow_hints(&symbol).unwrap_or_else(|_| json!({}));
+        let data = self.get_data_flow_hints(&symbol).unwrap_or_else(|_| json!({}));
+
+        let mut ranked_context = planned
+            .get("context")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for item in &mut ranked_context {
+            let mut score = 100i64;
+            let priority = item.get("priority").and_then(|v| v.as_i64()).unwrap_or(3);
+            score -= priority * 10;
+            let raw_included = item.get("raw_included").and_then(|v| v.as_bool()).unwrap_or(false);
+            if raw_included {
+                score += 5;
+            }
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("hybrid_score".to_string(), json!(score));
+            }
+        }
+        ranked_context.sort_by(|a, b| {
+            let ascore = a.get("hybrid_score").and_then(|v| v.as_i64()).unwrap_or_default();
+            let bscore = b.get("hybrid_score").and_then(|v| v.as_i64()).unwrap_or_default();
+            bscore.cmp(&ascore)
+        });
+
+        Ok(json!({
+            "query": query,
+            "symbol": symbol,
+            "strategy": "hybrid_ranked_context",
+            "control_flow_hints": control.get("metrics").cloned().unwrap_or_else(|| json!({})),
+            "data_flow_hints": data.get("data_flow_hints").cloned().unwrap_or_else(|| json!({})),
+            "ranked_context": ranked_context,
+        }))
+    }
+
+    fn try_get_cached_context(&self, key: &str, ttl_seconds: u64) -> Option<serde_json::Value> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let mut cache = self.planned_context_cache.lock().expect("cache lock");
+        let Some(entry) = cache.get_mut(key) else {
+            return None;
+        };
+        if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds {
+            cache.remove(key);
+            return None;
+        }
+        if let Some(obj) = entry.value.as_object_mut() {
+            obj.insert("cache".to_string(), json!({ "hit": true }));
+        }
+        Some(entry.value.clone())
+    }
+
+    fn store_cached_context(&self, key: String, value: serde_json::Value, max_entries: usize) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let mut cache = self.planned_context_cache.lock().expect("cache lock");
+        if cache.len() >= max_entries {
+            if let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.cached_at_epoch_s)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest_key);
+            }
+        }
+        cache.insert(
+            key,
+            CachedContext {
+                cached_at_epoch_s: now,
+                value,
+            },
+        );
     }
 
     fn plan_safe_edit(

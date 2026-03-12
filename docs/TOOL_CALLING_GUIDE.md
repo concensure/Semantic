@@ -18,6 +18,11 @@ Primary goals:
   - `POST /retrieve` for retrieval operations
   - `PATCH /edit` for safe edit planning/execution
   - `GET /llm_tools` for discoverable tool metadata
+  - `POST /ide_autoroute` for IDE-native semantic-first routing
+  - `GET /performance_stats` for runtime hardening metrics
+  - `GET /control_flow_hints?symbol=...` for control-flow hints
+  - `GET /data_flow_hints?symbol=...` for data-flow hints
+  - `POST /hybrid_ranked_context` for hybrid ranked context retrieval
 - MCP bridge:
   - `GET /mcp/tools`
   - `POST /mcp/tools/call`
@@ -126,6 +131,12 @@ Common MCP tool names:
 4. For patch planning: call `plan_safe_edit` or `/edit`.
 5. For obvious single-file edits: set `single_file_fast_path=true`.
 
+IDE-native shortcut:
+
+1. Call `ide_autoroute` first with `{ task, session_id, max_tokens, single_file_fast_path }`.
+2. Use returned `selected_tool` + `result` as the first semantic context.
+3. Continue with `plan_safe_edit` / `/edit` using the same `session_id`.
+
 ## Token Usage Guidance
 
 Best savings:
@@ -139,6 +150,12 @@ Can cost more:
 - tiny one-file tasks where orchestration overhead dominates
 - over-broad `limit`/`radius`/`max_tokens` settings
 - unnecessary repeated semantic calls for trivial edits
+
+Mitigations implemented:
+
+- planned-context cache with TTL for repeated query reuse
+- default `single_file_fast_path=true` in `ide_autoroute`
+- bounded response shapes (no forced expansion of extra raw files)
 
 ## Discoverability
 

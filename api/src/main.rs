@@ -67,6 +67,11 @@ async fn main() -> Result<()> {
         .route("/retrieve", post(retrieve))
         .route("/llm_tools", get(get_llm_tools))
         .route("/semantic_ui", get(get_semantic_ui))
+        .route("/ide_autoroute", post(ide_autoroute))
+        .route("/performance_stats", get(get_performance_stats))
+        .route("/control_flow_hints", get(get_control_flow_hints))
+        .route("/data_flow_hints", get(get_data_flow_hints))
+        .route("/hybrid_ranked_context", post(get_hybrid_ranked_context))
         .route("/semantic_middleware", get(get_semantic_middleware))
         .route("/semantic_middleware", post(update_semantic_middleware))
         .route("/edit", patch(edit))
@@ -190,6 +195,161 @@ fn should_block_compressed_semantic(operation: &Operation) -> bool {
             | Operation::GetWorkspaceReasoningContext
             | Operation::PlanSafeEdit
     )
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct IdeAutoRouteRequest {
+    task: String,
+    session_id: Option<String>,
+    max_tokens: Option<usize>,
+    single_file_fast_path: Option<bool>,
+}
+
+async fn ide_autoroute(
+    State(state): State<AppState>,
+    Json(body): Json<IdeAutoRouteRequest>,
+) -> Json<serde_json::Value> {
+    let intent = detect_ide_intent(&body.task);
+    let max_tokens = body.max_tokens.unwrap_or(1400);
+    let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
+
+    let planned_request = RetrievalRequest {
+        operation: Operation::GetPlannedContext,
+        name: None,
+        query: Some(body.task.clone()),
+        file: None,
+        start_line: None,
+        end_line: None,
+        max_tokens: Some(max_tokens),
+        workspace_scope: None,
+        limit: None,
+        node_id: None,
+        radius: None,
+        logic_radius: None,
+        dependency_radius: None,
+        edit_description: None,
+        patch_mode: None,
+        run_tests: None,
+    };
+
+    let planned = state
+        .retrieval
+        .lock()
+        .handle_with_options(planned_request, Some(single_file_fast_path));
+
+    let (selected_tool, result) = match planned {
+        Ok(r) => ("get_planned_context", r.result),
+        Err(_) => {
+            let fallback = RetrievalRequest {
+                operation: Operation::SearchSemanticSymbol,
+                name: None,
+                query: Some(body.task.clone()),
+                file: None,
+                start_line: None,
+                end_line: None,
+                max_tokens: None,
+                workspace_scope: None,
+                limit: Some(8),
+                node_id: None,
+                radius: None,
+                logic_radius: None,
+                dependency_radius: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
+            };
+            match state.retrieval.lock().handle(fallback) {
+                Ok(r) => ("search_semantic_symbol", r.result),
+                Err(err) => {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "intent": intent,
+                        "selected_tool": "none",
+                        "error": err.to_string()
+                    }));
+                }
+            }
+        }
+    };
+
+    if let Some(session_id) = body.session_id {
+        let mut middleware = state.semantic_middleware.lock();
+        middleware.retrieved_sessions.insert(session_id);
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "intent": intent,
+        "selected_tool": selected_tool,
+        "single_file_fast_path": single_file_fast_path,
+        "result": result
+    }))
+}
+
+fn detect_ide_intent(task: &str) -> &'static str {
+    let t = task.to_lowercase();
+    if t.contains("fix") || t.contains("bug") || t.contains("error") {
+        "debug"
+    } else if t.contains("refactor") || t.contains("rewrite") || t.contains("optimize") {
+        "refactor"
+    } else if t.contains("add") || t.contains("implement") || t.contains("change") {
+        "implement"
+    } else {
+        "understand"
+    }
+}
+
+async fn get_performance_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "result": state.retrieval.lock().get_performance_stats()
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SymbolHintsQuery {
+    symbol: String,
+}
+
+async fn get_control_flow_hints(
+    State(state): State<AppState>,
+    Query(query): Query<SymbolHintsQuery>,
+) -> Json<serde_json::Value> {
+    match state.retrieval.lock().get_control_flow_hints(&query.symbol) {
+        Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
+}
+
+async fn get_data_flow_hints(
+    State(state): State<AppState>,
+    Query(query): Query<SymbolHintsQuery>,
+) -> Json<serde_json::Value> {
+    match state.retrieval.lock().get_data_flow_hints(&query.symbol) {
+        Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HybridContextRequest {
+    query: String,
+    max_tokens: Option<usize>,
+    single_file_fast_path: Option<bool>,
+}
+
+async fn get_hybrid_ranked_context(
+    State(state): State<AppState>,
+    Json(body): Json<HybridContextRequest>,
+) -> Json<serde_json::Value> {
+    match state.retrieval.lock().get_hybrid_ranked_context(
+        &body.query,
+        body.max_tokens.unwrap_or(1400),
+        body.single_file_fast_path.unwrap_or(true),
+    ) {
+        Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
 }
 
 async fn get_llm_tools(State(state): State<AppState>) -> Json<serde_json::Value> {

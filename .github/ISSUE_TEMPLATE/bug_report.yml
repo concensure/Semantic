@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible problem in Semantic retrieval/editing behavior.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please include concrete repro steps and expected vs actual behavior.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: Short description of the bug.
+      placeholder: Retrieval returns wrong span for a symbol rename task
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List exact steps, API calls, and payloads.
+      placeholder: |
+        1. Start API with test_repo
+        2. POST /ide_autoroute with ...
+        3. PATCH /edit with ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - retrieval
+        - safe edit planner
+        - API
+        - MCP bridge
+        - A/B testing
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: e.g. 0.1.0 or commit SHA
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs/output
+      render: shell

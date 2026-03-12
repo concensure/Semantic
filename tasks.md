@@ -48,3 +48,27 @@
 3. Logic clustering.
 4. Semantic node labels.
 5. Hybrid graph ranking.
+
+## Phase 5: Product Maturity Roadmap
+
+1. Persistent retrieval cache:
+   - Move planned-context cache from in-memory to SQLite-backed persistence.
+   - Add file-change invalidation hooks so stale cache entries are dropped automatically.
+2. Full CFG/Data-Flow graph extraction:
+   - Extend parser/indexer/storage to persist actual control-flow and data-flow edges (not just hints).
+   - Add retrieval operations for CFG slice and data-flow slice.
+3. Adaptive retrieval policy:
+   - Auto-select `single_file_fast_path` vs multi-hop retrieval based on dependency fanout and edit risk.
+   - Add policy thresholds in `.semantic` config.
+4. Quality-gated A/B evaluation:
+   - Score tasks by executable patch success + tests passing, not only prompt-shape checks.
+   - Add regression thresholds for token and step metrics.
+5. IDE integration pack:
+   - Provide ready-made templates for RooCode/KiloCode/Codex/Claude to call `ide_autoroute` first.
+   - Include semantic-first fail-safe policy defaults.
+6. Context compaction controls:
+   - Add per-step token caps (plan/lookup/edit) and enforce structured refs before raw code expansion.
+   - Add strict anti-bloat mode for small single-file edits.
+7. Observability and SLOs:
+   - Track p95/p99 latency and cache hit rate per operation over time.
+   - Add alert thresholds for latency regressions and cache miss spikes.
