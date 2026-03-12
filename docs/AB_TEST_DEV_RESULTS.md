@@ -40,7 +40,7 @@ Latest gating signals (run B):
 2. Call:
 
 ```bash
-curl -X POST http://127.0.0.1:4317/ab_test_dev \
+curl -X POST "$SEMANTIC_API_BASE_URL/ab_test_dev" \
   -H "content-type: application/json" \
   -d '{"provider":"openai","autoroute_first":true,"single_file_fast_path":true}'
 ```
