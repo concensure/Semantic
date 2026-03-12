@@ -26,10 +26,18 @@ struct AppState {
     semantic_middleware: Arc<Mutex<SemanticMiddlewareState>>,
 }
 
-#[derive(Default)]
 struct SemanticMiddlewareState {
     semantic_first_enabled: bool,
     retrieved_sessions: HashSet<String>,
+}
+
+impl Default for SemanticMiddlewareState {
+    fn default() -> Self {
+        Self {
+            semantic_first_enabled: true,
+            retrieved_sessions: HashSet::new(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -149,7 +157,11 @@ async fn retrieve(
     let result = state
         .retrieval
         .lock()
-        .handle_with_options(request, body.single_file_fast_path);
+        .handle_with_options(
+            request,
+            body.single_file_fast_path,
+            Some(!body.reference_only.unwrap_or(true)),
+        );
     if result.is_ok() {
         if let Some(session_id) = body.session_id.as_ref() {
             let mut middleware = state.semantic_middleware.lock();
@@ -176,6 +188,7 @@ struct RetrieveRequestBody {
     input_compressed: Option<bool>,
     original_query: Option<String>,
     single_file_fast_path: Option<bool>,
+    reference_only: Option<bool>,
     session_id: Option<String>,
 }
 
@@ -203,6 +216,8 @@ struct IdeAutoRouteRequest {
     session_id: Option<String>,
     max_tokens: Option<usize>,
     single_file_fast_path: Option<bool>,
+    reference_only: Option<bool>,
+    auto_minimal_raw: Option<bool>,
 }
 
 async fn ide_autoroute(
@@ -212,6 +227,8 @@ async fn ide_autoroute(
     let intent = detect_ide_intent(&body.task);
     let max_tokens = body.max_tokens.unwrap_or(1400);
     let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
+    let reference_only = body.reference_only.unwrap_or(true);
+    let auto_minimal_raw = body.auto_minimal_raw.unwrap_or(true);
 
     let planned_request = RetrievalRequest {
         operation: Operation::GetPlannedContext,
@@ -235,9 +252,13 @@ async fn ide_autoroute(
     let planned = state
         .retrieval
         .lock()
-        .handle_with_options(planned_request, Some(single_file_fast_path));
+        .handle_with_options(
+            planned_request,
+            Some(single_file_fast_path),
+            Some(!reference_only),
+        );
 
-    let (selected_tool, result) = match planned {
+    let (selected_tool, mut result) = match planned {
         Ok(r) => ("get_planned_context", r.result),
         Err(_) => {
             let fallback = RetrievalRequest {
@@ -277,11 +298,20 @@ async fn ide_autoroute(
         middleware.retrieved_sessions.insert(session_id);
     }
 
+    if reference_only && auto_minimal_raw {
+        if let Some(seed) = build_minimal_raw_seed(&result, &state) {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("minimal_raw_seed".to_string(), seed);
+            }
+        }
+    }
+
     Json(serde_json::json!({
         "ok": true,
         "intent": intent,
         "selected_tool": selected_tool,
         "single_file_fast_path": single_file_fast_path,
+        "reference_only": reference_only,
         "result": result
     }))
 }
@@ -297,6 +327,43 @@ fn detect_ide_intent(task: &str) -> &'static str {
     } else {
         "understand"
     }
+}
+
+fn build_minimal_raw_seed(
+    planned_result: &serde_json::Value,
+    state: &AppState,
+) -> Option<serde_json::Value> {
+    let first = planned_result.get("context")?.as_array()?.first()?;
+    let file = first.get("file")?.as_str()?.to_string();
+    let start = first.get("start")?.as_u64()? as u32;
+    let end = first.get("end")?.as_u64()? as u32;
+    let clipped_end = start.saturating_add(40).min(end);
+
+    let req = RetrievalRequest {
+        operation: Operation::GetCodeSpan,
+        name: None,
+        query: None,
+        file: Some(file.clone()),
+        start_line: Some(start),
+        end_line: Some(clipped_end),
+        max_tokens: None,
+        workspace_scope: None,
+        limit: None,
+        node_id: None,
+        radius: None,
+        logic_radius: None,
+        dependency_radius: None,
+        edit_description: None,
+        patch_mode: None,
+        run_tests: None,
+    };
+    let result = state.retrieval.lock().handle(req).ok()?;
+    Some(serde_json::json!({
+        "file": file,
+        "start": start,
+        "end": clipped_end,
+        "code_span": result.result
+    }))
 }
 
 async fn get_performance_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -388,6 +455,7 @@ pre{background:#f4f4f4;padding:12px;overflow:auto;white-space:pre-wrap}
 <label>Edit description</label><input id="edit" placeholder="Add due date validation"/>
 <label>Session id (optional, required only when semantic middleware semantic-first is enabled)</label><input id="session_id" placeholder="dev-session-1"/>
 <label><input type="checkbox" id="semantic_enabled" checked/> Semantic enabled</label><br/>
+<label><input type="checkbox" id="reference_only" checked/> Reference-only mode (default)</label><br/>
 <label><input type="checkbox" id="single_file_fast_path"/> Single-file fast path</label><br/>
 <label><input type="checkbox" id="compressed"/> Input compressed</label><br/>
 <label>Original query (required when compressed semantic is used)</label><input id="original_query" placeholder="original user query"/>
@@ -413,6 +481,7 @@ async function sendRetrieve(){
     dependency_radius:1,
     edit_description:document.getElementById('edit').value||null,
     semantic_enabled:document.getElementById('semantic_enabled').checked,
+    reference_only:document.getElementById('reference_only').checked,
     single_file_fast_path:document.getElementById('single_file_fast_path').checked,
     input_compressed:document.getElementById('compressed').checked,
     original_query:document.getElementById('original_query').value||null,

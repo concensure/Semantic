@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use budgeter::{select_with_budget, ContextBudget, ContextItem};
 use engine::{LogicNodeRecord, Operation, RetrievalRequest, RetrievalResponse, SymbolRecord, SymbolType};
-use planner::{Planner, QueryIntent};
+use planner::Planner;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -18,7 +18,7 @@ pub struct RetrievalService {
     perf_stats: Mutex<PerfStats>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedContext {
     cached_at_epoch_s: u64,
     value: serde_json::Value,
@@ -77,10 +77,11 @@ struct ContextTuning {
 }
 impl RetrievalService {
     pub fn new(repo_root: PathBuf, storage: storage::Storage) -> Self {
+        let cache = load_planned_context_cache(&repo_root);
         Self {
             repo_root,
             storage,
-            planned_context_cache: Mutex::new(HashMap::new()),
+            planned_context_cache: Mutex::new(cache),
             perf_stats: Mutex::new(PerfStats::default()),
         }
     }
@@ -118,13 +119,14 @@ impl RetrievalService {
     }
 
     pub fn handle(&self, request: RetrievalRequest) -> Result<RetrievalResponse> {
-        self.handle_with_options(request, None)
+        self.handle_with_options(request, None, None)
     }
 
     pub fn handle_with_options(
         &self,
         request: RetrievalRequest,
         single_file_fast_path: Option<bool>,
+        include_raw_code_override: Option<bool>,
     ) -> Result<RetrievalResponse> {
         let op_name = format!("{:?}", request.operation).to_lowercase();
         let started = Instant::now();
@@ -206,6 +208,7 @@ impl RetrievalService {
                     &query,
                     max_tokens,
                     single_file_fast_path.unwrap_or(false),
+                    include_raw_code_override,
                 )?
             }
             Operation::GetRepoMapHierarchy => self.get_repo_map_hierarchy()?,
@@ -227,6 +230,7 @@ impl RetrievalService {
                     max_tokens,
                     request.workspace_scope.unwrap_or_default(),
                     single_file_fast_path.unwrap_or(false),
+                    include_raw_code_override,
                 )?
             }
             Operation::PlanSafeEdit => {
@@ -280,6 +284,12 @@ impl RetrievalService {
             })
             .collect();
 
+        let cache_hits = perf.cache_hits;
+        let cache_misses = perf.cache_misses;
+        let cache_evictions = perf.cache_evictions;
+        drop(perf);
+        let cache_entries = self.planned_context_cache.lock().expect("cache lock").len();
+
         json!({
             "targets": {
                 "index_throughput_goal": "10k files under 20s (target)",
@@ -287,10 +297,10 @@ impl RetrievalService {
                 "planned_context_p95_goal": "<60ms (target)"
             },
             "cache": {
-                "entries": self.planned_context_cache.lock().expect("cache lock").len(),
-                "hits": perf.cache_hits,
-                "misses": perf.cache_misses,
-                "evictions": perf.cache_evictions,
+                "entries": cache_entries,
+                "hits": cache_hits,
+                "misses": cache_misses,
+                "evictions": cache_evictions,
             },
             "operations": op_stats
         })
@@ -692,7 +702,12 @@ impl RetrievalService {
                 cached.clone()
             } else {
                 let fresh = self
-                    .get_planned_context(task.semantic_query, max_tokens, single_file_fast_path)
+                    .get_planned_context(
+                        task.semantic_query,
+                        max_tokens,
+                        single_file_fast_path,
+                        Some(false),
+                    )
                     .unwrap_or_else(|_| json!({ "context": [] }));
                 context_cache.insert(cache_key, fresh.clone());
                 fresh
@@ -1005,8 +1020,10 @@ impl RetrievalService {
             "retrieval_policy": {
                 "two_stage_retrieval": true,
                 "structured_refs_default": true,
-                "auto_raw_code_for_edit_tasks": true,
-                "single_file_fast_path": "supported in /ab_test_dev via request.single_file_fast_path (default=true)"
+                "reference_only_default": true,
+                "minimal_raw_seed_via_autoroute": true,
+                "adaptive_breadth": true,
+                "single_file_fast_path": "supported in /ab_test_dev and /ide_autoroute (default=true)"
             },
             "tools": [
                 {"name":"get_repo_map","operation":"GetRepoMap","purpose":"List indexed files."},
@@ -1026,6 +1043,7 @@ impl RetrievalService {
             ],
             "workflow_recommendation": [
                 "Use semantic_enabled=false for pure chat or conceptual Q&A.",
+                "Use /ide_autoroute as the default first call for planning/editing workflows.",
                 "Use semantic_enabled=true for planning, code edits, and execution-oriented tasks.",
                 "Avoid compressed prompts for semantic operations unless original_query is also provided."
             ]
@@ -1334,9 +1352,13 @@ impl RetrievalService {
         query: &str,
         max_tokens: usize,
         single_file_fast_path: bool,
+        include_raw_code_override: Option<bool>,
     ) -> Result<serde_json::Value> {
-        let cache_key = format!("planned::{query}::{max_tokens}::{single_file_fast_path}");
-        if let Some(cached) = self.try_get_cached_context(&cache_key, 600) {
+        let include_raw_code = include_raw_code_override.unwrap_or(false);
+        let cache_key = format!(
+            "planned::{query}::{max_tokens}::{single_file_fast_path}::{include_raw_code}"
+        );
+        if let Some(cached) = self.try_get_cached_context(&cache_key, 3600) {
             let mut perf = self.perf_stats.lock().expect("perf lock");
             perf.cache_hits += 1;
             return Ok(cached);
@@ -1372,10 +1394,6 @@ impl RetrievalService {
         let plan = planner
             .build_plan_with_modules(query, &symbol_names, &symbol_to_module, &named_module_deps)
             .ok_or_else(|| anyhow!("unable to determine target symbol from query"))?;
-        let include_raw_code = matches!(
-            intent,
-            QueryIntent::Debug | QueryIntent::Refactor | QueryIntent::LocateSymbol
-        );
 
         let target_symbol = self
             .storage
@@ -1384,6 +1402,13 @@ impl RetrievalService {
         let target_id = target_symbol
             .id
             .ok_or_else(|| anyhow!("target symbol id missing"))?;
+        let (effective_logic_radius, effective_dependency_radius, breadth) =
+            self.optimize_retrieval_breadth(
+                target_id,
+                plan.logic_radius,
+                plan.dependency_radius,
+                max_tokens,
+            )?;
 
         if single_file_fast_path {
             let target_code = if include_raw_code {
@@ -1402,6 +1427,7 @@ impl RetrievalService {
                 "symbol": plan.target_symbol,
                 "intent": format!("{intent:?}").to_lowercase(),
                 "plan": plan,
+                "effective_breadth": breadth,
                 "small_repo_mode": self.storage.list_files()?.len() < 50,
                 "single_file_fast_path": true,
                 "retrieval_strategy": "single_file_fast_path",
@@ -1420,7 +1446,7 @@ impl RetrievalService {
                 }],
                 "cache": { "hit": false }
             });
-            self.store_cached_context(cache_key, output.clone(), 512);
+            self.store_cached_context(cache_key, output.clone(), 1024);
             return Ok(output);
         }
 
@@ -1448,7 +1474,8 @@ impl RetrievalService {
         let mut logic_context = Vec::new();
         for node in &logic_nodes {
             if let Some(node_id) = node.id {
-                logic_context.append(&mut self.storage.get_logic_neighbors(node_id, plan.logic_radius)?);
+                logic_context
+                    .append(&mut self.storage.get_logic_neighbors(node_id, effective_logic_radius)?);
             }
         }
         logic_context.sort_by_key(|n| (n.id.unwrap_or_default(), n.start_line, n.end_line));
@@ -1494,8 +1521,12 @@ impl RetrievalService {
             }
         }
 
-        let neighbors =
-            collect_dependency_neighbors(&self.storage, target_id, plan.dependency_radius, plan.include_callers)?;
+        let neighbors = collect_dependency_neighbors(
+            &self.storage,
+            target_id,
+            effective_dependency_radius,
+            plan.include_callers,
+        )?;
         for dep in neighbors {
             if let Some(dep_id) = dep.id {
                 if dep_id == target_id || direct_ids.contains(&dep_id) {
@@ -1581,13 +1612,14 @@ impl RetrievalService {
             "symbol": plan.target_symbol,
             "intent": format!("{intent:?}").to_lowercase(),
             "plan": plan,
+            "effective_breadth": breadth,
             "small_repo_mode": file_count < 50,
             "retrieval_strategy": "two_stage_rank_then_span_fetch",
             "include_raw_code": include_raw_code,
             "context": assembled,
             "cache": { "hit": false }
         });
-        self.store_cached_context(cache_key, output.clone(), 512);
+        self.store_cached_context(cache_key, output.clone(), 1024);
         Ok(output)
     }
 
@@ -1597,12 +1629,18 @@ impl RetrievalService {
         max_tokens: usize,
         workspace_scope: Vec<String>,
         single_file_fast_path: bool,
+        include_raw_code_override: Option<bool>,
     ) -> Result<serde_json::Value> {
         let mut repositories = self.storage.list_repositories()?;
         if !workspace_scope.is_empty() {
             repositories.retain(|r| workspace_scope.iter().any(|s| s == &r.name || s == &r.path));
         }
-        let planned = self.get_planned_context(query, max_tokens, single_file_fast_path)?;
+        let planned = self.get_planned_context(
+            query,
+            max_tokens,
+            single_file_fast_path,
+            include_raw_code_override,
+        )?;
         Ok(json!({
             "workspace_repositories": repositories,
             "workspace_scope": workspace_scope,
@@ -1709,7 +1747,8 @@ impl RetrievalService {
         max_tokens: usize,
         single_file_fast_path: bool,
     ) -> Result<serde_json::Value> {
-        let planned = self.get_planned_context(query, max_tokens, single_file_fast_path)?;
+        let planned =
+            self.get_planned_context(query, max_tokens, single_file_fast_path, Some(false))?;
         let symbol = planned
             .get("symbol")
             .and_then(|v| v.as_str())
@@ -1767,6 +1806,9 @@ impl RetrievalService {
         };
         if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds {
             cache.remove(key);
+            drop(cache);
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.cache_evictions += 1;
             return None;
         }
         if let Some(obj) = entry.value.as_object_mut() {
@@ -1781,6 +1823,7 @@ impl RetrievalService {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let mut cache = self.planned_context_cache.lock().expect("cache lock");
+        let mut evicted = false;
         if cache.len() >= max_entries {
             if let Some(oldest_key) = cache
                 .iter()
@@ -1788,6 +1831,7 @@ impl RetrievalService {
                 .map(|(k, _)| k.clone())
             {
                 cache.remove(&oldest_key);
+                evicted = true;
             }
         }
         cache.insert(
@@ -1797,6 +1841,60 @@ impl RetrievalService {
                 value,
             },
         );
+        save_planned_context_cache(&self.repo_root, &cache);
+        drop(cache);
+        if evicted {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.cache_evictions += 1;
+        }
+    }
+
+    fn optimize_retrieval_breadth(
+        &self,
+        target_id: i64,
+        base_logic_radius: usize,
+        base_dependency_radius: usize,
+        max_tokens: usize,
+    ) -> Result<(usize, usize, serde_json::Value)> {
+        let direct_deps = self.storage.get_symbol_dependencies(target_id)?.len();
+        let callers = self.storage.get_symbol_callers(target_id)?.len();
+        let logic_nodes = self.storage.get_logic_nodes(target_id)?.len();
+        let fanout = direct_deps.saturating_add(callers);
+
+        let mut logic_radius = base_logic_radius.max(1);
+        let mut dependency_radius = base_dependency_radius.max(1);
+
+        if max_tokens <= 1200 {
+            logic_radius = 1;
+            dependency_radius = 1;
+        }
+        if fanout > 12 {
+            dependency_radius = dependency_radius.min(1);
+        } else if fanout < 4 && max_tokens > 2600 {
+            dependency_radius = dependency_radius.max(2).min(3);
+        }
+        if logic_nodes > 24 {
+            logic_radius = logic_radius.min(1);
+        } else if logic_nodes < 8 && max_tokens > 2600 {
+            logic_radius = logic_radius.max(2).min(3);
+        }
+
+        Ok((
+            logic_radius,
+            dependency_radius,
+            json!({
+                "base_logic_radius": base_logic_radius,
+                "base_dependency_radius": base_dependency_radius,
+                "logic_radius": logic_radius,
+                "dependency_radius": dependency_radius,
+                "fanout": fanout,
+                "direct_dependencies": direct_deps,
+                "callers": callers,
+                "logic_nodes": logic_nodes,
+                "max_tokens": max_tokens,
+                "policy": "adaptive_case_by_case"
+            }),
+        ))
     }
 
     fn plan_safe_edit(
@@ -3147,6 +3245,32 @@ fn module_rank_for_file(
         }
     } else {
         2
+    }
+}
+
+fn planned_context_cache_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".semantic").join("planned_context_cache.json")
+}
+
+fn load_planned_context_cache(repo_root: &Path) -> HashMap<String, CachedContext> {
+    let path = planned_context_cache_path(repo_root);
+    if !path.exists() {
+        return HashMap::new();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str::<HashMap<String, CachedContext>>(&raw).unwrap_or_default()
+}
+
+fn save_planned_context_cache(repo_root: &Path, cache: &HashMap<String, CachedContext>) {
+    let path = planned_context_cache_path(repo_root);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(serialized) = serde_json::to_string(cache) {
+        let _ = fs::write(path, serialized);
     }
 }
 
