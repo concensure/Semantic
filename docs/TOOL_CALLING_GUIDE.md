@@ -153,6 +153,29 @@ Can cost more:
 - over-broad `limit`/`radius`/`max_tokens` settings
 - unnecessary repeated semantic calls for trivial edits
 
+## Large Documents and Rulebooks (How To Use Semantic Retrieval)
+
+Current state:
+
+- The core parser/indexer is code-focused (Python/JavaScript/TypeScript).
+- Large policy/rules markdown documents should be used as:
+  - always-on short global rules in IDE skill/rule sections
+  - conditional/contextual sections retrieved on demand via semantic-first routing
+
+Recommended pattern:
+
+1. Keep global non-negotiable rules short in IDE skills/rules.
+2. Split large rulebooks by topic into smaller files/sections.
+3. Route first with `ide_autoroute` using the task description.
+4. Fetch only minimal spans (`reference_only=true` + `minimal_raw_seed`).
+5. For edit execution, fetch raw code only for the selected target span.
+
+Why this works:
+
+- avoids attaching full rulebooks to every prompt
+- preserves deterministic code-context retrieval for edits
+- reduces repeated context transfer in multi-step workflows
+
 Mitigations implemented:
 
 - planned-context cache with TTL for repeated query reuse

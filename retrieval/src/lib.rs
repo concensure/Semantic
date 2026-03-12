@@ -21,6 +21,8 @@ pub struct RetrievalService {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedContext {
     cached_at_epoch_s: u64,
+    #[serde(default)]
+    source_revision: u64,
     value: serde_json::Value,
 }
 
@@ -1800,11 +1802,14 @@ impl RetrievalService {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default();
+        let current_revision = current_index_revision(&self.repo_root);
         let mut cache = self.planned_context_cache.lock().expect("cache lock");
         let Some(entry) = cache.get_mut(key) else {
             return None;
         };
-        if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds {
+        if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds
+            || entry.source_revision != current_revision
+        {
             cache.remove(key);
             drop(cache);
             let mut perf = self.perf_stats.lock().expect("perf lock");
@@ -1822,6 +1827,7 @@ impl RetrievalService {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default();
+        let source_revision = current_index_revision(&self.repo_root);
         let mut cache = self.planned_context_cache.lock().expect("cache lock");
         let mut evicted = false;
         if cache.len() >= max_entries {
@@ -1838,6 +1844,7 @@ impl RetrievalService {
             key,
             CachedContext {
                 cached_at_epoch_s: now,
+                source_revision,
                 value,
             },
         );
@@ -3272,6 +3279,16 @@ fn save_planned_context_cache(repo_root: &Path, cache: &HashMap<String, CachedCo
     if let Ok(serialized) = serde_json::to_string(cache) {
         let _ = fs::write(path, serialized);
     }
+}
+
+fn current_index_revision(repo_root: &Path) -> u64 {
+    let (db_path, _) = storage::default_paths(repo_root);
+    std::fs::metadata(db_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 fn read_span(repo_root: &Path, relative_file: &str, start_line: u32, end_line: u32) -> Result<String> {
