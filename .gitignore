@@ -43,9 +43,12 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.semantic/.env
+.semantic/mcp_bridge_token.txt
 
 # Test repo runtime data
 test_repo/.semantic/
+ab_test_raw_results.json
 # UI deps
 .semantic/node_modules/
 .semantic/package-lock.json
