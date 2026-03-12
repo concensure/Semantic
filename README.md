@@ -28,7 +28,7 @@ Phase-2 adds logic-node indexing and retrieval for semantic sub-blocks.
 cargo run -p api -- ./test_repo
 ```
 
-Service binds to `127.0.0.1:4317`.
+Service binds to `$SEMANTIC_API_BASE_URL`.
 
 New semantic-first/IDE endpoints:
 
@@ -161,7 +161,7 @@ Config files:
 Edit endpoint:
 
 ```bash
-curl -X PATCH <SEMANTIC_API_BASE_URL>/edit \
+curl -X PATCH "$SEMANTIC_API_BASE_URL/edit" \
   -H "content-type: application/json" \
   -d '{"symbol":"retryRequest","edit":"add exponential backoff","patch_mode":"preview_only","run_tests":true}'
 ```
@@ -169,15 +169,15 @@ curl -X PATCH <SEMANTIC_API_BASE_URL>/edit \
 Patch memory endpoints:
 
 ```bash
-curl "<SEMANTIC_API_BASE_URL>/patch_memory?symbol=retryRequest"
-curl "<SEMANTIC_API_BASE_URL>/patch_stats?repository=my-repo"
-curl "<SEMANTIC_API_BASE_URL>/model_performance"
+curl "$SEMANTIC_API_BASE_URL/patch_memory?symbol=retryRequest"
+curl "$SEMANTIC_API_BASE_URL/patch_stats?repository=my-repo"
+curl "$SEMANTIC_API_BASE_URL/model_performance"
 ```
 
 Refactor status endpoint:
 
 ```bash
-curl "<SEMANTIC_API_BASE_URL>/refactor_status"
+curl "$SEMANTIC_API_BASE_URL/refactor_status"
 ```
 
 Refactor snapshots are stored in:
@@ -187,9 +187,9 @@ Refactor snapshots are stored in:
 Evolution endpoints:
 
 ```bash
-curl "<SEMANTIC_API_BASE_URL>/evolution_issues?repository=core_api"
-curl "<SEMANTIC_API_BASE_URL>/evolution_plans?repository=core_api"
-curl -X POST "<SEMANTIC_API_BASE_URL>/generate_evolution_plan" \
+curl "$SEMANTIC_API_BASE_URL/evolution_issues?repository=core_api"
+curl "$SEMANTIC_API_BASE_URL/evolution_plans?repository=core_api"
+curl -X POST "$SEMANTIC_API_BASE_URL/generate_evolution_plan" \
   -H "content-type: application/json" \
   -d '{"repository":"core_api","dry_run":true}'
 ```
@@ -197,7 +197,7 @@ curl -X POST "<SEMANTIC_API_BASE_URL>/generate_evolution_plan" \
 ## Example Request
 
 ```bash
-curl -X POST <SEMANTIC_API_BASE_URL>/retrieve \
+curl -X POST "$SEMANTIC_API_BASE_URL/retrieve" \
   -H "content-type: application/json" \
   -d '{"operation":"get_function","name":"retryRequest"}'
 ```
