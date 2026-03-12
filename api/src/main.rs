@@ -926,6 +926,7 @@ struct ABTestDevRequest {
     provider: Option<String>,
     max_context_tokens: Option<usize>,
     single_file_fast_path: Option<bool>,
+    autoroute_first: Option<bool>,
 }
 
 async fn run_ab_test_dev(
@@ -936,6 +937,7 @@ async fn run_ab_test_dev(
     let provider = body.provider;
     let max_context_tokens = body.max_context_tokens;
     let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
+    let autoroute_first = body.autoroute_first.unwrap_or(true);
     let retrieval = state.retrieval.clone();
     let result = tokio::task::spawn_blocking(move || {
         retrieval
@@ -945,6 +947,7 @@ async fn run_ab_test_dev(
                 provider,
                 max_context_tokens,
                 single_file_fast_path,
+                autoroute_first,
             )
     })
     .await;

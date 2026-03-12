@@ -624,6 +624,7 @@ impl RetrievalService {
         provider: Option<String>,
         max_context_tokens: Option<usize>,
         single_file_fast_path: bool,
+        autoroute_first: bool,
     ) -> Result<serde_json::Value> {
         load_env_from_file(&self.repo_root);
         ensure_todo_ab_project(&self.repo_root)?;
@@ -698,19 +699,30 @@ impl RetrievalService {
                 semantic_exec_success += 1;
             }
 
-            let cache_key = format!("{}::{}", task.semantic_query, max_tokens);
-            let planned_context = if let Some(cached) = context_cache.get(&cache_key) {
+            let cache_key = format!(
+                "{}::{}::autoroute={}",
+                task.semantic_query, max_tokens, autoroute_first
+            );
+            let semantic_context = if let Some(cached) = context_cache.get(&cache_key) {
                 context_cache_hits += 1;
                 cached.clone()
             } else {
-                let fresh = self
-                    .get_planned_context(
+                let fresh = if autoroute_first {
+                    self.autoroute_context_for_ab(
+                        task.semantic_query,
+                        max_tokens,
+                        single_file_fast_path,
+                    )
+                    .unwrap_or_else(|_| json!({ "context": [] }))
+                } else {
+                    self.get_planned_context(
                         task.semantic_query,
                         max_tokens,
                         single_file_fast_path,
                         Some(false),
                     )
-                    .unwrap_or_else(|_| json!({ "context": [] }));
+                    .unwrap_or_else(|_| json!({ "context": [] }))
+                };
                 context_cache.insert(cache_key, fresh.clone());
                 fresh
             };
@@ -730,7 +742,7 @@ impl RetrievalService {
                 })
                 .unwrap_or_default();
             let tuning = context_tuning_for_task(&task, impacted_file_count, max_tokens);
-            let refs = build_structured_context_refs(&planned_context, tuning.ref_limit);
+            let refs = build_structured_context_refs(&semantic_context, tuning.ref_limit);
             let delta_refs: Vec<serde_json::Value> = refs
                 .iter()
                 .filter(|r| {
@@ -778,19 +790,36 @@ impl RetrievalService {
                     control_attachment_context, base_prompt
                 )
             };
+            let minimal_raw_seed = semantic_context
+                .get("minimal_raw_seed")
+                .and_then(|v| v.get("code_span"))
+                .and_then(|v| v.get("code"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             let mut with_prompt_light = build_light_prompt_from_refs(
                 &base_prompt,
                 &delta_refs,
                 delta_refs.len(),
             );
+            if autoroute_first && task.requires_code_change && !minimal_raw_seed.is_empty() {
+                with_prompt_light = format!(
+                    "Structured context refs (delta from previous step):\n{}\n\nMinimal raw seed (autoroute):\n{}\n\nTask:\n{}",
+                    serde_json::to_string_pretty(&delta_refs).unwrap_or_default(),
+                    minimal_raw_seed,
+                    base_prompt
+                );
+            }
 
-            let result_a = call_live_llm(
+            let result_a_attempt = call_live_llm_with_diagnostics(
                 &selected_provider,
                 provider_settings.get(&selected_provider),
                 route.as_ref().map(|r| r.endpoint.as_str()),
                 &without_prompt,
                 700,
             );
+            let result_a = result_a_attempt.as_ref().ok().cloned();
+            let result_a_error = result_a_attempt.err();
             let (a_tokens, a_output) = result_a
                 .as_ref()
                 .map(|r| (r.total_tokens, r.text.clone()))
@@ -805,13 +834,15 @@ impl RetrievalService {
                 with_prompt_light = build_light_prompt_from_refs(&base_prompt, &delta_refs, refs_used);
             }
 
-            let result_b = call_live_llm(
+            let result_b_attempt = call_live_llm_with_diagnostics(
                 &selected_provider,
                 provider_settings.get(&selected_provider),
                 route.as_ref().map(|r| r.endpoint.as_str()),
                 &with_prompt_light,
                 700,
             );
+            let result_b = result_b_attempt.as_ref().ok().cloned();
+            let mut result_b_error = result_b_attempt.err();
 
             let (b_tokens, b_output) = result_b
                 .as_ref()
@@ -841,17 +872,21 @@ impl RetrievalService {
                 {
                     guardrail_applied = true;
                 } else {
-                let result_b_heavy = call_live_llm(
+                let result_b_heavy_attempt = call_live_llm_with_diagnostics(
                     &selected_provider,
                     provider_settings.get(&selected_provider),
                     route.as_ref().map(|r| r.endpoint.as_str()),
                     &with_prompt_heavy,
                     700,
                 );
+                let result_b_heavy = result_b_heavy_attempt.as_ref().ok().cloned();
                 let (heavy_tokens, heavy_output) = result_b_heavy
                     .as_ref()
                     .map(|r| (r.total_tokens, r.text.clone()))
                     .unwrap_or((estimate_tokens(&with_prompt_heavy), String::new()));
+                if result_b_heavy.is_none() {
+                    result_b_error = result_b_heavy_attempt.err();
+                }
                 b_tokens_final += heavy_tokens;
                 let heavy_hits = score_expected_terms(&heavy_output, &task.expected_terms);
                 if heavy_hits >= b_hits {
@@ -902,9 +937,12 @@ impl RetrievalService {
                 "semantic_features": task.semantic_features.clone(),
                 "semantic_query": task.semantic_query,
                 "target_symbol": task.target_symbol,
+                "autoroute_first": autoroute_first,
                 "tokens_without_semantic": a_tokens,
                 "tokens_with_semantic": b_tokens_final,
                 "token_savings_pct": task_savings_pct,
+                "live_call_error_without_semantic": result_a_error,
+                "live_call_error_with_semantic": result_b_error,
                 "escalation_used": escalation_used,
                 "guardrail_applied": guardrail_applied,
                 "light_ref_count_used": refs_used,
@@ -919,9 +957,11 @@ impl RetrievalService {
                 "title": task.title,
                 "target_symbol": task.target_symbol,
                 "single_file_fast_path": single_file_fast_path,
+                "autoroute_first": autoroute_first,
                 "without_semantic": {
                     "tokens": a_tokens,
                     "live_call": result_a.is_some(),
+                    "live_call_error": result_a_error,
                     "expected_term_hits": a_hits,
                     "prompt": without_prompt,
                     "output": a_output,
@@ -929,6 +969,7 @@ impl RetrievalService {
                 "with_semantic": {
                     "tokens": b_tokens_final,
                     "live_call": result_b.is_some(),
+                    "live_call_error": result_b_error,
                     "expected_term_hits": b_hits,
                     "prompt": with_prompt_final,
                     "output": b_output_final,
@@ -989,6 +1030,7 @@ impl RetrievalService {
             "suite_task_count": task_count,
             "suite_capabilities": ["due_date", "priority_reorder", "tags", "ui_menu_tooling"],
             "single_file_fast_path": single_file_fast_path,
+            "autoroute_first": autoroute_first,
             "context_cache_hits": context_cache_hits,
             "without_project": {
                 "tokens": total_without,
@@ -1650,6 +1692,49 @@ impl RetrievalService {
         }))
     }
 
+    fn autoroute_context_for_ab(
+        &self,
+        task_query: &str,
+        max_tokens: usize,
+        single_file_fast_path: bool,
+    ) -> Result<serde_json::Value> {
+        let mut planned =
+            self.get_planned_context(task_query, max_tokens, single_file_fast_path, Some(false))?;
+        let first = planned
+            .get("context")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .cloned();
+        if let Some(first_ctx) = first {
+            let file = first_ctx.get("file").and_then(|v| v.as_str()).unwrap_or_default();
+            let start = first_ctx
+                .get("start")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default() as u32;
+            let end = first_ctx
+                .get("end")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default() as u32;
+            if !file.is_empty() && start > 0 && end >= start {
+                let clipped_end = start.saturating_add(40).min(end);
+                if let Ok(span) = self.get_code_span(file, start, clipped_end) {
+                    if let Some(obj) = planned.as_object_mut() {
+                        obj.insert(
+                            "minimal_raw_seed".to_string(),
+                            json!({
+                                "file": file,
+                                "start": start,
+                                "end": clipped_end,
+                                "code_span": span
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(planned)
+    }
+
     pub fn get_control_flow_hints(&self, symbol: &str) -> Result<serde_json::Value> {
         let sym = self
             .storage
@@ -2239,6 +2324,23 @@ fn call_live_llm(
     prompt: &str,
     max_tokens: usize,
 ) -> Option<LLMCallResult> {
+    call_live_llm_with_diagnostics(
+        provider,
+        provider_setting,
+        routed_endpoint,
+        prompt,
+        max_tokens,
+    )
+    .ok()
+}
+
+fn call_live_llm_with_diagnostics(
+    provider: &str,
+    provider_setting: Option<&ProviderSetting>,
+    routed_endpoint: Option<&str>,
+    prompt: &str,
+    max_tokens: usize,
+) -> std::result::Result<LLMCallResult, String> {
     let setting = provider_setting.cloned().unwrap_or(ProviderSetting {
         model: default_model_for_provider(provider).to_string(),
         api_key_env: default_key_env_for_provider(provider).map(|s| s.to_string()),
@@ -2252,8 +2354,16 @@ fn call_live_llm(
         return call_ollama(&endpoint, &setting.model, prompt);
     }
 
-    let api_key_env = setting.api_key_env.clone()?;
-    let api_key = std::env::var(api_key_env).ok()?;
+    let api_key_env = setting
+        .api_key_env
+        .clone()
+        .ok_or_else(|| format!("provider '{provider}' missing api_key_env setting"))?;
+    let api_key = std::env::var(&api_key_env)
+        .map_err(|_| format!("missing env var: {api_key_env}"))?;
+    if api_key.trim().is_empty() {
+        return Err(format!("empty env var: {api_key_env}"));
+    }
+
     if provider == "anthropic" {
         return call_anthropic(&endpoint, &api_key, &setting.model, prompt, max_tokens);
     }
@@ -2269,7 +2379,7 @@ fn call_openai_family(
     model: &str,
     prompt: &str,
     max_tokens: usize,
-) -> Option<LLMCallResult> {
+) -> std::result::Result<LLMCallResult, String> {
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let response = client
@@ -2282,8 +2392,13 @@ fn call_openai_family(
             "max_tokens": max_tokens
         }))
         .send()
-        .ok()?;
-    let value: serde_json::Value = response.json().ok()?;
+        .map_err(|e| format!("openai-family network error: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("openai-family http status: {}", response.status()));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("openai-family invalid json: {e}"))?;
     let text = value
         .get("choices")
         .and_then(|c| c.as_array())
@@ -2299,7 +2414,7 @@ fn call_openai_family(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or_else(|| estimate_tokens(&(prompt.to_string() + &text)));
-    Some(LLMCallResult {
+    Ok(LLMCallResult {
         model: model.to_string(),
         total_tokens: tokens,
         text,
@@ -2312,7 +2427,7 @@ fn call_anthropic(
     model: &str,
     prompt: &str,
     max_tokens: usize,
-) -> Option<LLMCallResult> {
+) -> std::result::Result<LLMCallResult, String> {
     let url = format!("{}/messages", endpoint.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let response = client
@@ -2326,8 +2441,13 @@ fn call_anthropic(
             "messages": [{"role":"user","content": prompt}]
         }))
         .send()
-        .ok()?;
-    let value: serde_json::Value = response.json().ok()?;
+        .map_err(|e| format!("anthropic network error: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("anthropic http status: {}", response.status()));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("anthropic invalid json: {e}"))?;
     let text = value
         .get("content")
         .and_then(|v| v.as_array())
@@ -2342,7 +2462,7 @@ fn call_anthropic(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize + estimate_tokens(&text))
         .unwrap_or_else(|| estimate_tokens(&(prompt.to_string() + &text)));
-    Some(LLMCallResult {
+    Ok(LLMCallResult {
         model: model.to_string(),
         total_tokens: tokens,
         text,
@@ -2355,7 +2475,7 @@ fn call_gemini(
     model: &str,
     prompt: &str,
     max_tokens: usize,
-) -> Option<LLMCallResult> {
+) -> std::result::Result<LLMCallResult, String> {
     let base = endpoint.trim_end_matches('/');
     let url = format!(
         "{}/v1beta/models/{}:generateContent?key={}",
@@ -2370,8 +2490,13 @@ fn call_gemini(
             "generationConfig": {"maxOutputTokens": max_tokens}
         }))
         .send()
-        .ok()?;
-    let value: serde_json::Value = response.json().ok()?;
+        .map_err(|e| format!("gemini network error: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("gemini http status: {}", response.status()));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("gemini invalid json: {e}"))?;
     let text = value
         .get("candidates")
         .and_then(|v| v.as_array())
@@ -2390,14 +2515,18 @@ fn call_gemini(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or_else(|| estimate_tokens(&(prompt.to_string() + &text)));
-    Some(LLMCallResult {
+    Ok(LLMCallResult {
         model: model.to_string(),
         total_tokens: tokens,
         text,
     })
 }
 
-fn call_ollama(endpoint: &str, model: &str, prompt: &str) -> Option<LLMCallResult> {
+fn call_ollama(
+    endpoint: &str,
+    model: &str,
+    prompt: &str,
+) -> std::result::Result<LLMCallResult, String> {
     let url = format!("{}/api/generate", endpoint.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let response = client
@@ -2409,14 +2538,19 @@ fn call_ollama(endpoint: &str, model: &str, prompt: &str) -> Option<LLMCallResul
             "stream": false
         }))
         .send()
-        .ok()?;
-    let value: serde_json::Value = response.json().ok()?;
+        .map_err(|e| format!("ollama network error: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("ollama http status: {}", response.status()));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("ollama invalid json: {e}"))?;
     let text = value
         .get("response")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    Some(LLMCallResult {
+    Ok(LLMCallResult {
         model: model.to_string(),
         total_tokens: estimate_tokens(&(prompt.to_string() + &text)),
         text,
