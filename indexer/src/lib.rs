@@ -1,15 +1,34 @@
 use anyhow::Result;
 use parser::SupportedLanguage;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::time::Instant;
 use walkdir::WalkDir;
 
 pub struct Indexer {
     parser: parser::CodeParser,
     pub storage: storage::Storage,
     repo_id: i64,
+    perf_stats: IndexerPerfStats,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct IndexerPerfStats {
+    repo_runs: u64,
+    file_updates: u64,
+    files_indexed: u64,
+    files_skipped: u64,
+    files_deleted: u64,
+    total_repo_ms: u128,
+    total_update_ms: u128,
+    max_repo_ms: u128,
+    max_update_ms: u128,
+    last_repo_ms: u128,
+    last_update_ms: u128,
+    last_repo_file_count: usize,
 }
 
 impl Indexer {
@@ -18,6 +37,7 @@ impl Indexer {
             parser: parser::CodeParser::new(),
             storage,
             repo_id: 0,
+            perf_stats: IndexerPerfStats::default(),
         }
     }
 
@@ -26,6 +46,7 @@ impl Indexer {
     }
 
     pub fn index_repo(&mut self, repo_path: &Path) -> Result<()> {
+        let started = Instant::now();
         let mut seen = HashSet::new();
 
         for entry in WalkDir::new(repo_path).into_iter().filter_map(|e| e.ok()) {
@@ -44,7 +65,7 @@ impl Indexer {
             }
 
             seen.insert(rel.clone());
-            self.index_file(repo_path, &rel)?;
+            self.index_file_internal(repo_path, &rel, false)?;
         }
 
         for existing in self.storage.list_files()? {
@@ -56,16 +77,33 @@ impl Indexer {
 
         self.rebuild_module_graph()?;
         self.storage.refresh_symbol_index()?;
+        self.perf_stats.repo_runs += 1;
+        self.perf_stats.last_repo_file_count = seen.len();
+        self.record_repo_elapsed(started.elapsed().as_millis());
+        self.persist_perf_stats(repo_path)?;
         Ok(())
     }
 
     pub fn index_file(&mut self, repo_path: &Path, relative_file: &str) -> Result<()> {
+        self.index_file_internal(repo_path, relative_file, true)
+    }
+
+    fn index_file_internal(
+        &mut self,
+        repo_path: &Path,
+        relative_file: &str,
+        refresh_after: bool,
+    ) -> Result<()> {
+        let started = Instant::now();
         let file_path = repo_path.join(relative_file);
         let content = fs::read_to_string(&file_path)?;
         let checksum = checksum(&content);
 
         if let Some(existing) = self.storage.get_file_checksum(relative_file)? {
             if existing == checksum {
+                self.perf_stats.files_skipped += 1;
+                self.record_update_elapsed(started.elapsed().as_millis());
+                self.persist_perf_stats(repo_path)?;
                 return Ok(());
             }
         }
@@ -79,9 +117,18 @@ impl Indexer {
             &parsed.symbols,
             &parsed.dependencies,
             &parsed.logic_nodes,
+            &parsed.control_flow_edges,
+            &parsed.data_flow_edges,
+            &parsed.logic_clusters,
         )?;
-        self.rebuild_module_graph()?;
-        self.storage.refresh_symbol_index()?;
+        self.perf_stats.file_updates += 1;
+        self.perf_stats.files_indexed += 1;
+        if refresh_after {
+            self.rebuild_module_graph()?;
+            self.storage.refresh_symbol_index()?;
+        }
+        self.record_update_elapsed(started.elapsed().as_millis());
+        self.persist_perf_stats(repo_path)?;
         Ok(())
     }
 
@@ -90,6 +137,7 @@ impl Indexer {
         self.storage.delete_file_metadata(relative_file)?;
         self.rebuild_module_graph()?;
         self.storage.refresh_symbol_index()?;
+        self.perf_stats.files_deleted += 1;
         Ok(())
     }
 
@@ -160,6 +208,44 @@ impl Indexer {
 
         Ok(())
     }
+
+    fn record_repo_elapsed(&mut self, elapsed_ms: u128) {
+        self.perf_stats.total_repo_ms += elapsed_ms;
+        self.perf_stats.last_repo_ms = elapsed_ms;
+        self.perf_stats.max_repo_ms = self.perf_stats.max_repo_ms.max(elapsed_ms);
+    }
+
+    fn record_update_elapsed(&mut self, elapsed_ms: u128) {
+        self.perf_stats.total_update_ms += elapsed_ms;
+        self.perf_stats.last_update_ms = elapsed_ms;
+        self.perf_stats.max_update_ms = self.perf_stats.max_update_ms.max(elapsed_ms);
+    }
+
+    fn persist_perf_stats(&self, repo_path: &Path) -> Result<()> {
+        let path = repo_path.join(".semantic").join("index_performance.json");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let payload = serde_json::json!({
+            "repo_runs": self.perf_stats.repo_runs,
+            "file_updates": self.perf_stats.file_updates,
+            "files_indexed": self.perf_stats.files_indexed,
+            "files_skipped": self.perf_stats.files_skipped,
+            "files_deleted": self.perf_stats.files_deleted,
+            "last_repo_ms": self.perf_stats.last_repo_ms,
+            "last_update_ms": self.perf_stats.last_update_ms,
+            "max_repo_ms": self.perf_stats.max_repo_ms,
+            "max_update_ms": self.perf_stats.max_update_ms,
+            "avg_repo_ms": average_ms(self.perf_stats.total_repo_ms, self.perf_stats.repo_runs),
+            "avg_update_ms": average_ms(
+                self.perf_stats.total_update_ms,
+                self.perf_stats.file_updates + self.perf_stats.files_skipped,
+            ),
+            "last_repo_file_count": self.perf_stats.last_repo_file_count,
+        });
+        fs::write(path, serde_json::to_string_pretty(&payload)?)?;
+        Ok(())
+    }
 }
 
 fn detect_module_from_file(file: &str) -> (String, String) {
@@ -179,6 +265,14 @@ fn checksum(content: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
     format!("{:x}", hasher.finish())
+}
+
+fn average_ms(total_ms: u128, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total_ms as f64 / count as f64
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +337,28 @@ mod tests {
             .list_named_module_dependencies()
             .expect("module deps");
         assert!(deps.iter().any(|(from, to)| from == "api" && to == "utils"));
+    }
+
+    #[test]
+    fn writes_index_performance_stats() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("src")).expect("mkdir src");
+        fs::write(
+            repo.join("src").join("a.py"),
+            "def retry_request():\n    return 1\n",
+        )
+        .expect("write file");
+
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        let stats_path = repo.join(".semantic").join("index_performance.json");
+        let stats = fs::read_to_string(stats_path).expect("read stats");
+        assert!(stats.contains("\"repo_runs\""));
+        assert!(stats.contains("\"last_repo_ms\""));
     }
 }

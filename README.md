@@ -1,6 +1,6 @@
 # Semantic Agent Cognitive Layer (MVP)
 
-Local Rust service for deterministic code retrieval by symbol/code span.
+Local Rust service for deterministic code retrieval by symbol, span, and logic graph.
 
 ## IDE Semantic-First Integration
 
@@ -20,7 +20,7 @@ Use the semantic-first integration guide for RooCode/KiloCode/Codex/Claude wirin
 - `watcher` incremental file updates
 - `api` Axum JSON service
 
-Phase-2 adds logic-node indexing and retrieval for semantic sub-blocks.
+Implemented semantic layers now include logic nodes, persisted control/data-flow edges, semantic node labels, and graph-backed clustering/ranking.
 
 ## Run
 
@@ -34,7 +34,7 @@ Service binds to `$SEMANTIC_API_BASE_URL`.
 
 The MCP bridge (`mcp_bridge`) exposes **two primary tools** that cover all use cases:
 
-- **`retrieve`** — unified retrieval. Pass `operation` to select: `GetRepoMap`, `GetFileOutline`, `SearchSymbol`, `GetCodeSpan`, `GetLogicNodes`, `GetDependencyNeighborhood`, `GetReasoningContext`, `GetPlannedContext`, `PlanSafeEdit`, `GetControlFlowHints`, `GetDataFlowHints`, `GetHybridRankedContext`, `GetDebugGraph`, `GetPipelineGraph`, `GetRootCauseCandidates`, `GetTestGaps`, `GetDeploymentHistory`, `GetPerformanceStats`.
+- **`retrieve`** — unified retrieval. Pass `operation` to select: `GetRepoMap`, `GetFileOutline`, `SearchSymbol`, `GetCodeSpan`, `GetLogicNodes`, `GetControlFlowSlice`, `GetDataFlowSlice`, `GetLogicClusters`, `GetDependencyNeighborhood`, `GetReasoningContext`, `GetPlannedContext`, `PlanSafeEdit`, `GetControlFlowHints`, `GetDataFlowHints`, `GetHybridRankedContext`, `GetDebugGraph`, `GetPipelineGraph`, `GetRootCauseCandidates`, `GetTestGaps`, `GetDeploymentHistory`, `GetPerformanceStats`.
 - **`ide_autoroute`** — intent routing (`task`) or action dispatch (`action` + `action_input`). Actions: `debug_failure`, `generate_tests`, `apply_tests`, `analyze_pipeline`.
 
 All 27 legacy named tools remain available for backward compatibility (see `GET /mcp/tools` → `legacy_tools`).
@@ -90,7 +90,7 @@ Additional retrieval operations:
 
 ## Reasoning Retrieval
 
-Phase-3 reasoning retrieval combines logic-node and dependency traversal:
+Implemented reasoning retrieval combines logic-node and dependency traversal:
 
 - `get_dependency_neighborhood`: BFS over dependency graph by symbol.
 - `get_symbol_neighborhood`: symbol with local logic and dependency neighbors.
@@ -108,6 +108,16 @@ API -> Planner -> Retrieval Engine -> Budgeter -> Context Assembler
 - deterministic retrieval planning
 - token-budget-based context selection
 - adaptive small-repo bypass (`files < 50`)
+
+## Graph Semantics
+
+Implemented graph semantics now include:
+
+- persisted control-flow edges (`get_control_flow_slice`)
+- persisted data-flow edges with variable names (`get_data_flow_slice`)
+- semantic labels on logic nodes (`get_logic_nodes`)
+- clustered logic regions (`get_logic_clusters`)
+- hybrid graph ranking that blends symbol, dependency, and graph-density signals
 
 ## Module Graph and Hierarchy
 
@@ -212,5 +222,6 @@ curl -X POST "$SEMANTIC_API_BASE_URL/retrieve" \
 ## Notes
 
 - Storage paths: `./.semantic/semantic.db` and `./.semantic/tantivy/`.
+- Index performance stats: `./.semantic/index_performance.json`.
 - Watcher reindexes changed files incrementally.
-- Current parser is symbol-level; logic-node retrieval is designed as next phase.
+- Runtime docs use environment placeholders such as `$SEMANTIC_API_BASE_URL`; do not commit local URLs, API keys, or tokens.

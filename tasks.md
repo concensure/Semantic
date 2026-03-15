@@ -14,7 +14,7 @@
 4. Implement indexer and watcher for incremental updates.
 5. Implement API endpoint and deterministic retrieval contract.
 
-## Phase 2: Logic-Node Layer (Current)
+## Phase 2: Logic-Node Layer (Implemented)
 
 1. Add `LogicNodeType`, `LogicNodeRecord`, `LogicEdgeRecord`.
 2. Extend operation contract with:
@@ -34,29 +34,37 @@
 9. Extend fixture repo with async control-flow example.
 10. Add tests for extraction, persistence, and retrieval determinism.
 
-## Phase 3: Performance and Hardening
+## Phase 3: Performance and Hardening (Implemented)
 
-1. Benchmark indexing throughput (10k files under 20s target).
-2. Benchmark lookup latency (<10ms symbol lookup target).
-3. Add instrumentation for index/update/query timings.
-4. Optimize transaction batching and index refresh strategy if needed.
+1. Add query/runtime instrumentation with per-operation avg/p95/max timings.
+2. Persist indexing/update timings in `.semantic/index_performance.json`.
+3. Expose combined retrieval + indexing stats via `GetPerformanceStats`.
+4. Optimize full-repo indexing by batching file replacements and deferring index refresh/module rebuild until the repo pass completes.
+5. Track benchmark targets in the surfaced performance stats:
+   - indexing throughput (`10k files under 20s` target)
+   - symbol lookup latency (`<10ms` target)
+   - planned-context p95 (`<60ms` target)
 
-## Phase 4: Reserved Future Work (Not Implemented)
+## Phase 4: Graph Semantics Layer (Implemented)
 
-1. Control-flow graph edges.
-2. Data-flow edges.
-3. Logic clustering.
-4. Semantic node labels.
-5. Hybrid graph ranking.
+1. Persist control-flow graph edges per symbol.
+2. Persist data-flow edges per symbol with variable names.
+3. Add semantic node labels to logic nodes.
+4. Persist clustered logic regions per symbol.
+5. Add retrieval operations for:
+   - `get_control_flow_slice`
+   - `get_data_flow_slice`
+   - `get_logic_clusters`
+6. Upgrade hybrid ranking to use persisted graph signals, not only symbol/dependency heuristics.
 
 ## Phase 5: Product Maturity Roadmap
 
 1. Persistent retrieval cache:
    - Move planned-context cache from in-memory to SQLite-backed persistence.
    - Add file-change invalidation hooks so stale cache entries are dropped automatically.
-2. Full CFG/Data-Flow graph extraction:
-   - Extend parser/indexer/storage to persist actual control-flow and data-flow edges (not just hints).
-   - Add retrieval operations for CFG slice and data-flow slice.
+2. Higher-fidelity CFG/Data-Flow extraction:
+   - Improve graph precision with branch-specific and path-merge semantics.
+   - Add richer slice traversal policies on top of the persisted graph layer.
 3. Adaptive retrieval policy:
    - Auto-select `single_file_fast_path` vs multi-hop retrieval based on dependency fanout and edit risk.
    - Add policy thresholds in `.semantic` config.

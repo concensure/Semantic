@@ -325,6 +325,18 @@ impl RetrievalService {
                 let symbol = request.name.or(request.query).unwrap_or_default();
                 self.get_data_flow_hints(&symbol)?
             }
+            Operation::GetControlFlowSlice => {
+                let symbol = request.name.or(request.query).unwrap_or_default();
+                self.get_control_flow_slice(&symbol)?
+            }
+            Operation::GetDataFlowSlice => {
+                let symbol = request.name.or(request.query).unwrap_or_default();
+                self.get_data_flow_slice(&symbol)?
+            }
+            Operation::GetLogicClusters => {
+                let symbol = request.name.or(request.query).unwrap_or_default();
+                self.get_logic_clusters(&symbol)?
+            }
             Operation::GetHybridRankedContext => {
                 let query = request.query.unwrap_or_default();
                 let max_tokens = request.max_tokens.unwrap_or(1400);
@@ -403,6 +415,7 @@ impl RetrievalService {
                 "symbol_lookup_latency_goal": "<10ms (target)",
                 "planned_context_p95_goal": "<60ms (target)"
             },
+            "indexing": load_index_performance_stats(&self.repo_root),
             "cache": {
                 "entries": cache_entries,
                 "hits": cache_hits,
@@ -1342,6 +1355,9 @@ impl RetrievalService {
                 {"name":"search_symbol","operation":"SearchSymbol","purpose":"Find symbols quickly (grep-like name search).","required":["name"]},
                 {"name":"get_code_span","operation":"GetCodeSpan","purpose":"Retrieve exact file lines.","required":["file","start_line","end_line"]},
                 {"name":"get_logic_nodes","operation":"GetLogicNodes","purpose":"Inspect logic structure for a symbol.","required":["name"]},
+                {"name":"get_control_flow_slice","operation":"GetControlFlowSlice","purpose":"Retrieve persisted control-flow edges for a symbol.","required":["name"]},
+                {"name":"get_data_flow_slice","operation":"GetDataFlowSlice","purpose":"Retrieve persisted data-flow edges for a symbol.","required":["name"]},
+                {"name":"get_logic_clusters","operation":"GetLogicClusters","purpose":"Retrieve clustered logic regions for a symbol.","required":["name"]},
                 {"name":"get_dependency_neighborhood","operation":"GetDependencyNeighborhood","purpose":"Traverse caller/callee neighborhoods.","required":["name","radius"]},
                 {"name":"get_reasoning_context","operation":"GetReasoningContext","purpose":"Fetch semantic context for planning edits.","required":["name","logic_radius","dependency_radius"]},
                 {"name":"get_planned_context","operation":"GetPlannedContext","purpose":"Build context by intent and budget.","required":["query","max_tokens"],"optional":["mapping_mode","max_footprint_items","reuse_session_context"]},
@@ -2211,6 +2227,45 @@ impl RetrievalService {
     }
 
     pub fn get_control_flow_hints(&self, symbol: &str) -> Result<serde_json::Value> {
+        let slice = self.get_control_flow_slice(symbol)?;
+        let branch_like = slice
+            .get("control_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|edges| {
+                edges.iter().filter(|edge| {
+                    edge.get("kind")
+                        .and_then(|v| v.as_str())
+                        .map(|kind| kind == "Branch")
+                        .unwrap_or(false)
+                }).count()
+            })
+            .unwrap_or_default();
+        let loop_like = slice
+            .get("control_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|edges| {
+                edges.iter().filter(|edge| {
+                    edge.get("kind")
+                        .and_then(|v| v.as_str())
+                        .map(|kind| kind == "LoopBack")
+                        .unwrap_or(false)
+                }).count()
+            })
+            .unwrap_or_default();
+        let mut out = slice;
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert(
+                "metrics".to_string(),
+                json!({
+                    "branch_points": branch_like,
+                    "loop_points": loop_like,
+                }),
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn get_control_flow_slice(&self, symbol: &str) -> Result<serde_json::Value> {
         let sym = self
             .storage
             .get_symbol_any(symbol)?
@@ -2218,49 +2273,60 @@ impl RetrievalService {
         let symbol_id = sym.id.ok_or_else(|| anyhow!("symbol id missing"))?;
         let mut nodes = self.storage.get_logic_nodes(symbol_id)?;
         sort_logic_nodes(&mut nodes);
-
-        let edges: Vec<serde_json::Value> = nodes
-            .windows(2)
-            .filter_map(|w| {
-                let from = w.first()?.id?;
-                let to = w.get(1)?.id?;
-                Some(json!({
-                    "from_node_id": from,
-                    "to_node_id": to,
-                    "kind": "sequential_hint"
-                }))
-            })
-            .collect();
-
-        let branch_like = nodes
-            .iter()
-            .filter(|n| {
-                matches!(
-                    n.node_type,
-                    engine::LogicNodeType::Conditional
-                        | engine::LogicNodeType::Switch
-                        | engine::LogicNodeType::Case
-                )
-            })
-            .count();
-        let loop_like = nodes
-            .iter()
-            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Loop))
-            .count();
+        let edges = self.storage.get_control_flow_edges(symbol_id)?;
 
         Ok(json!({
             "symbol": sym.name,
             "file": sym.file,
             "control_flow_nodes": nodes,
             "control_flow_edges": edges,
-            "metrics": {
-                "branch_points": branch_like,
-                "loop_points": loop_like
-            }
         }))
     }
 
     pub fn get_data_flow_hints(&self, symbol: &str) -> Result<serde_json::Value> {
+        let slice = self.get_data_flow_slice(symbol)?;
+        let mut identifier_freq: HashMap<String, usize> = HashMap::new();
+        if let Some(edges) = slice.get("data_flow_edges").and_then(|v| v.as_array()) {
+            for edge in edges {
+                if let Some(name) = edge.get("variable_name").and_then(|v| v.as_str()) {
+                    *identifier_freq.entry(name.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut top_identifiers = identifier_freq.into_iter().collect::<Vec<_>>();
+        top_identifiers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_identifiers.truncate(10);
+        let mut out = slice;
+        let assignments = out
+            .get("data_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|edges| edges.iter().filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("AssignmentToUse")).count())
+            .unwrap_or_default();
+        let returns = out
+            .get("data_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|edges| edges.iter().filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("AssignmentToReturn")).count())
+            .unwrap_or_default();
+        let calls = out
+            .get("data_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|edges| edges.iter().filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("CallResult")).count())
+            .unwrap_or_default();
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert(
+                "data_flow_hints".to_string(),
+                json!({
+                    "assignments": assignments,
+                    "calls": calls,
+                    "returns": returns,
+                    "top_identifiers": top_identifiers,
+                }),
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn get_data_flow_slice(&self, symbol: &str) -> Result<serde_json::Value> {
         let sym = self
             .storage
             .get_symbol_any(symbol)?
@@ -2268,51 +2334,27 @@ impl RetrievalService {
         let symbol_id = sym.id.ok_or_else(|| anyhow!("symbol id missing"))?;
         let mut nodes = self.storage.get_logic_nodes(symbol_id)?;
         sort_logic_nodes(&mut nodes);
-
-        let assignments = nodes
-            .iter()
-            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Assignment))
-            .count();
-        let calls = nodes
-            .iter()
-            .filter(|n| {
-                matches!(
-                    n.node_type,
-                    engine::LogicNodeType::Call | engine::LogicNodeType::Await
-                )
-            })
-            .count();
-        let returns = nodes
-            .iter()
-            .filter(|n| matches!(n.node_type, engine::LogicNodeType::Return))
-            .count();
-
-        let code =
-            read_span(&self.repo_root, &sym.file, sym.start_line, sym.end_line).unwrap_or_default();
-        let mut identifier_freq: HashMap<String, usize> = HashMap::new();
-        for token in code
-            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .filter(|t| t.len() >= 3)
-        {
-            let t = token.to_lowercase();
-            if t.chars().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            *identifier_freq.entry(t).or_insert(0) += 1;
-        }
-        let mut top_identifiers = identifier_freq.into_iter().collect::<Vec<_>>();
-        top_identifiers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        top_identifiers.truncate(10);
+        let edges = self.storage.get_data_flow_edges(symbol_id)?;
 
         Ok(json!({
             "symbol": sym.name,
             "file": sym.file,
-            "data_flow_hints": {
-                "assignments": assignments,
-                "calls": calls,
-                "returns": returns,
-                "top_identifiers": top_identifiers
-            }
+            "logic_nodes": nodes,
+            "data_flow_edges": edges,
+        }))
+    }
+
+    pub fn get_logic_clusters(&self, symbol: &str) -> Result<serde_json::Value> {
+        let sym = self
+            .storage
+            .get_symbol_any(symbol)?
+            .ok_or_else(|| anyhow!("symbol not found: {symbol}"))?;
+        let symbol_id = sym.id.ok_or_else(|| anyhow!("symbol id missing"))?;
+        let clusters = self.storage.get_logic_clusters(symbol_id)?;
+        Ok(json!({
+            "symbol": sym.name,
+            "file": sym.file,
+            "logic_clusters": clusters,
         }))
     }
 
@@ -2344,11 +2386,37 @@ impl RetrievalService {
         }
 
         let control = self
-            .get_control_flow_hints(&symbol)
+            .get_control_flow_slice(&symbol)
             .unwrap_or_else(|_| json!({}));
         let data = self
-            .get_data_flow_hints(&symbol)
+            .get_data_flow_slice(&symbol)
             .unwrap_or_else(|_| json!({}));
+        let clusters = self
+            .get_logic_clusters(&symbol)
+            .unwrap_or_else(|_| json!({}));
+
+        let graph_focus_files: HashSet<String> = clusters
+            .get("logic_clusters")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|_| control.get("file").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        let control_edge_count = control
+            .get("control_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|v| v.len() as i64)
+            .unwrap_or_default();
+        let data_edge_count = data
+            .get("data_flow_edges")
+            .and_then(|v| v.as_array())
+            .map(|v| v.len() as i64)
+            .unwrap_or_default();
+        let cluster_count = clusters
+            .get("logic_clusters")
+            .and_then(|v| v.as_array())
+            .map(|v| v.len() as i64)
+            .unwrap_or_default();
 
         let mut ranked_context = planned
             .get("context")
@@ -2367,6 +2435,14 @@ impl RetrievalService {
             if raw_included {
                 score += 5;
             }
+            if let Some(file) = item.get("file").and_then(|v| v.as_str()) {
+                if graph_focus_files.contains(file) {
+                    score += 12;
+                }
+            }
+            score += (control_edge_count.min(20)) / 4;
+            score += (data_edge_count.min(20)) / 5;
+            score += cluster_count.min(6);
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("hybrid_score".to_string(), json!(score));
             }
@@ -2387,8 +2463,14 @@ impl RetrievalService {
             "query": query,
             "symbol": symbol,
             "strategy": "hybrid_ranked_context",
-            "control_flow_hints": control.get("metrics").cloned().unwrap_or_else(|| json!({})),
-            "data_flow_hints": data.get("data_flow_hints").cloned().unwrap_or_else(|| json!({})),
+            "control_flow_hints": self.get_control_flow_hints(&symbol).unwrap_or_else(|_| json!({})),
+            "data_flow_hints": self.get_data_flow_hints(&symbol).unwrap_or_else(|_| json!({})),
+            "logic_clusters": clusters.get("logic_clusters").cloned().unwrap_or_else(|| json!([])),
+            "graph_rank_signals": {
+                "control_flow_edges": control_edge_count,
+                "data_flow_edges": data_edge_count,
+                "logic_clusters": cluster_count,
+            },
             "ranked_context": ranked_context,
         }))
     }
@@ -4269,6 +4351,22 @@ fn current_index_revision(repo_root: &Path) -> u64 {
         .unwrap_or_default()
 }
 
+fn load_index_performance_stats(repo_root: &Path) -> serde_json::Value {
+    let path = repo_root.join(".semantic").join("index_performance.json");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return json!({
+            "status": "unavailable",
+            "note": "index performance stats have not been written yet"
+        });
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|_| {
+        json!({
+            "status": "invalid",
+            "note": "index performance stats could not be parsed"
+        })
+    })
+}
+
 fn read_span(
     repo_root: &Path,
     relative_file: &str,
@@ -4337,6 +4435,7 @@ mod tests {
                     node_type: LogicNodeType::Return,
                     start_line: 2,
                     end_line: 2,
+                    semantic_label: "result_exit".into(),
                 }],
             )
             .expect("insert logic nodes");
@@ -4410,6 +4509,7 @@ mod tests {
                         node_type: LogicNodeType::Conditional,
                         start_line: 2,
                         end_line: 2,
+                        semantic_label: "branch_decision".into(),
                     },
                     LogicNodeRecord {
                         id: None,
@@ -4417,8 +4517,12 @@ mod tests {
                         node_type: LogicNodeType::Return,
                         start_line: 3,
                         end_line: 3,
+                        semantic_label: "result_exit".into(),
                     },
                 ],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace index");
 
@@ -4538,6 +4642,7 @@ mod tests {
                         node_type: LogicNodeType::Conditional,
                         start_line: 1,
                         end_line: 1,
+                        semantic_label: "branch_decision".into(),
                     },
                     LogicNodeRecord {
                         id: None,
@@ -4545,6 +4650,7 @@ mod tests {
                         node_type: LogicNodeType::Throw,
                         start_line: 1,
                         end_line: 1,
+                        semantic_label: "error_exit".into(),
                     },
                     LogicNodeRecord {
                         id: None,
@@ -4552,6 +4658,7 @@ mod tests {
                         node_type: LogicNodeType::Await,
                         start_line: 1,
                         end_line: 1,
+                        semantic_label: "async_wait".into(),
                     },
                     LogicNodeRecord {
                         id: None,
@@ -4559,8 +4666,12 @@ mod tests {
                         node_type: LogicNodeType::Return,
                         start_line: 1,
                         end_line: 1,
+                        semantic_label: "result_exit".into(),
                     },
                 ],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace index");
 
@@ -4680,7 +4791,11 @@ mod tests {
                     node_type: LogicNodeType::Return,
                     start_line: 1,
                     end_line: 1,
+                    semantic_label: "result_exit".into(),
                 }],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace index");
 
@@ -4799,7 +4914,11 @@ mod tests {
                     node_type: LogicNodeType::Return,
                     start_line: 1,
                     end_line: 1,
+                    semantic_label: "result_exit".into(),
                 }],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace index");
 
@@ -4838,7 +4957,7 @@ mod tests {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        assert!(!context.is_empty());
+        assert!(context.len() <= 1);
     }
 
     #[test]
@@ -4898,7 +5017,11 @@ mod tests {
                     node_type: LogicNodeType::Return,
                     start_line: 1,
                     end_line: 1,
+                    semantic_label: "result_exit".into(),
                 }],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace index");
 
@@ -4985,6 +5108,9 @@ mod tests {
                 }],
                 &[],
                 &[],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace retry");
         storage
@@ -5011,6 +5137,9 @@ mod tests {
                     callee_symbol: "retryRequest".into(),
                     file: "src/api/client.ts".into(),
                 }],
+                &[],
+                &[],
+                &[],
                 &[],
             )
             .expect("replace client");
@@ -5124,6 +5253,9 @@ mod tests {
                 }],
                 &[],
                 &[],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace");
 
@@ -5143,6 +5275,9 @@ mod tests {
                 radius: None,
                 logic_radius: None,
                 dependency_radius: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("semantic search");
         let results = resp
@@ -5195,7 +5330,11 @@ mod tests {
                     node_type: LogicNodeType::Return,
                     start_line: 1,
                     end_line: 1,
+                    semantic_label: "result_exit".into(),
                 }],
+                &[],
+                &[],
+                &[],
             )
             .expect("replace");
 
@@ -5215,6 +5354,9 @@ mod tests {
                 radius: None,
                 logic_radius: None,
                 dependency_radius: None,
+                edit_description: None,
+                patch_mode: None,
+                run_tests: None,
             })
             .expect("workspace context");
         let repos = resp

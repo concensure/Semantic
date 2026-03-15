@@ -35,6 +35,8 @@ Legacy named tools (`get_repo_map`, `debug_failure`, etc.) remain available for 
   - `GET /mcp/tools` — returns `tools` (primary) and `legacy_tools`
   - `POST /mcp/tools/call`
 
+Use environment placeholders in shared docs and configs. Do not publish workstation-local URLs, bridge tokens, or provider API keys.
+
 ## Core Retrieval Operations (`POST /retrieve`)
 
 Request envelope:
@@ -59,6 +61,9 @@ Supported operations and when to use them:
 - `get_dependencies`: direct dependencies for a symbol (`name` required)
 - `get_code_span`: exact line span retrieval (`file`, `start_line`, `end_line`)
 - `get_logic_nodes`: logic node retrieval for symbol (`name`)
+- `get_control_flow_slice`: persisted control-flow edges for a symbol (`name` or `query`)
+- `get_data_flow_slice`: persisted data-flow edges for a symbol (`name` or `query`)
+- `get_logic_clusters`: clustered logic regions for a symbol (`name` or `query`)
 - `get_logic_neighborhood`: neighboring logic nodes around node id (`node_id`, `radius`)
 - `get_logic_span`: retrieve code for one logic node (`node_id`)
 - `get_dependency_neighborhood`: caller/callee traversal (`name`, `radius`)

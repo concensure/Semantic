@@ -772,6 +772,11 @@ pre{background:#f4f4f4;padding:12px;overflow:auto;white-space:pre-wrap}
   <option>SearchSymbol</option>
   <option>GetCodeSpan</option>
   <option>GetLogicNodes</option>
+  <option>GetControlFlowSlice</option>
+  <option>GetDataFlowSlice</option>
+  <option>GetLogicClusters</option>
+  <option>GetHybridRankedContext</option>
+  <option>GetPerformanceStats</option>
   <option>PlanSafeEdit</option>
 </select>
 <label>Name / Symbol</label><input id="name" placeholder="retryRequest"/>

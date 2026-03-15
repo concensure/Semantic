@@ -29,7 +29,7 @@ pub struct DependencyRecord {
     pub file: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum LogicNodeType {
     Loop,
     Conditional,
@@ -52,6 +52,8 @@ pub struct LogicNodeRecord {
     pub node_type: LogicNodeType,
     pub start_line: usize,
     pub end_line: usize,
+    #[serde(default)]
+    pub semantic_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +61,38 @@ pub struct LogicEdgeRecord {
     pub id: Option<i64>,
     pub from_node_id: i64,
     pub to_node_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FlowEdgeKind {
+    Next,
+    Branch,
+    LoopBack,
+    Exception,
+    AssignmentToUse,
+    AssignmentToReturn,
+    CallResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowEdgeRecord {
+    pub id: Option<i64>,
+    pub symbol_id: i64,
+    pub from_node_id: i64,
+    pub to_node_id: i64,
+    pub kind: FlowEdgeKind,
+    #[serde(default)]
+    pub variable_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogicClusterRecord {
+    pub id: Option<i64>,
+    pub symbol_id: i64,
+    pub label: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub node_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +271,9 @@ pub struct ParsedFile {
     pub symbols: Vec<SymbolRecord>,
     pub dependencies: Vec<DependencyRecord>,
     pub logic_nodes: Vec<LogicNodeRecord>,
+    pub control_flow_edges: Vec<FlowEdgeRecord>,
+    pub data_flow_edges: Vec<FlowEdgeRecord>,
+    pub logic_clusters: Vec<LogicClusterRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +321,9 @@ pub enum Operation {
     // Unified retrieve operations (previously separate endpoints)
     GetControlFlowHints,
     GetDataFlowHints,
+    GetControlFlowSlice,
+    GetDataFlowSlice,
+    GetLogicClusters,
     GetHybridRankedContext,
     GetDebugGraph,
     GetPipelineGraph,

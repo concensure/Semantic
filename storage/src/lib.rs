@@ -1,7 +1,8 @@
 use anyhow::Result;
 use engine::{
-    DependencyRecord, LogicEdgeRecord, LogicNodeRecord, LogicNodeType, ModuleDependency,
-    ModuleFile, ModuleRecord, RepoDependency, RepositoryRecord, SymbolRecord, SymbolType,
+    DependencyRecord, FlowEdgeKind, FlowEdgeRecord, LogicClusterRecord, LogicEdgeRecord,
+    LogicNodeRecord, LogicNodeType, ModuleDependency, ModuleFile, ModuleRecord, RepoDependency,
+    RepositoryRecord, SymbolRecord, SymbolType,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -135,6 +136,7 @@ impl Storage {
         }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(SCHEMA_SQL)?;
+        ensure_runtime_migrations(&conn)?;
         let symbol_index = TantivySymbolIndex::open_or_create(tantivy_path)?;
         Ok(Self { conn, symbol_index })
     }
@@ -161,6 +163,9 @@ impl Storage {
         symbols: &[SymbolRecord],
         deps: &[DependencyRecord],
         logic_nodes: &[LogicNodeRecord],
+        control_flow_edges: &[FlowEdgeRecord],
+        data_flow_edges: &[FlowEdgeRecord],
+        logic_clusters: &[LogicClusterRecord],
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
 
@@ -174,6 +179,21 @@ impl Storage {
             params![file, language, checksum, now_timestamp_string()],
         )?;
 
+        tx.execute(
+            "DELETE FROM control_flow_edges
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
+        tx.execute(
+            "DELETE FROM data_flow_edges
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
+        tx.execute(
+            "DELETE FROM logic_clusters
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
         tx.execute(
             "DELETE FROM logic_edges
              WHERE from_node_id IN (
@@ -231,8 +251,8 @@ impl Storage {
         let mut inserted_logic_nodes = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO logic_nodes(symbol_id, node_type, start_line, end_line)
-                 VALUES(?1, ?2, ?3, ?4)",
+                "INSERT INTO logic_nodes(symbol_id, node_type, start_line, end_line, semantic_label)
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
             )?;
 
             let mut sorted_nodes = logic_nodes.to_vec();
@@ -246,6 +266,7 @@ impl Storage {
                         logic_node_type_to_str(&node.node_type),
                         node.start_line as i64,
                         node.end_line as i64,
+                        node.semantic_label,
                     ])?;
                     inserted_logic_nodes.push(LogicNodeRecord {
                         id: Some(tx.last_insert_rowid()),
@@ -253,6 +274,7 @@ impl Storage {
                         node_type: node.node_type,
                         start_line: node.start_line,
                         end_line: node.end_line,
+                        semantic_label: node.semantic_label,
                     });
                 }
             }
@@ -278,11 +300,30 @@ impl Storage {
             }
         }
 
+        insert_flow_edges_tx(&tx, "control_flow_edges", control_flow_edges, &inserted_logic_nodes)?;
+        insert_flow_edges_tx(&tx, "data_flow_edges", data_flow_edges, &inserted_logic_nodes)?;
+        insert_logic_clusters_tx(&tx, logic_clusters, &inserted_symbol_ids)?;
+
         tx.commit()?;
         Ok(())
     }
 
     pub fn delete_file_records(&self, file: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM control_flow_edges
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
+        self.conn.execute(
+            "DELETE FROM data_flow_edges
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
+        self.conn.execute(
+            "DELETE FROM logic_clusters
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
         self.conn.execute(
             "DELETE FROM logic_edges
              WHERE from_node_id IN (
@@ -348,8 +389,8 @@ impl Storage {
 
     pub fn insert_logic_nodes(&self, symbol_id: i64, nodes: &[LogicNodeRecord]) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
-            "INSERT INTO logic_nodes(symbol_id, node_type, start_line, end_line)
-             VALUES(?1, ?2, ?3, ?4)",
+            "INSERT INTO logic_nodes(symbol_id, node_type, start_line, end_line, semantic_label)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
         )?;
         let mut ids = Vec::with_capacity(nodes.len());
         for node in nodes {
@@ -358,6 +399,7 @@ impl Storage {
                 logic_node_type_to_str(&node.node_type),
                 node.start_line as i64,
                 node.end_line as i64,
+                node.semantic_label,
             ])?;
             ids.push(self.conn.last_insert_rowid());
         }
@@ -891,7 +933,7 @@ impl Storage {
 
     pub fn get_logic_nodes(&self, symbol_id: i64) -> Result<Vec<LogicNodeRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, symbol_id, node_type, start_line, end_line
+            "SELECT id, symbol_id, node_type, start_line, end_line, semantic_label
              FROM logic_nodes WHERE symbol_id = ?1
              ORDER BY start_line, end_line, id",
         )?;
@@ -902,6 +944,7 @@ impl Storage {
                 node_type: str_to_logic_node_type(&row.get::<_, String>(2)?),
                 start_line: row.get::<_, i64>(3)? as usize,
                 end_line: row.get::<_, i64>(4)? as usize,
+                semantic_label: row.get(5)?,
             })
         })?;
         let collected: rusqlite::Result<Vec<_>> = rows.collect();
@@ -910,7 +953,7 @@ impl Storage {
 
     pub fn get_logic_node(&self, node_id: i64) -> Result<Option<LogicNodeRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, symbol_id, node_type, start_line, end_line
+            "SELECT id, symbol_id, node_type, start_line, end_line, semantic_label
              FROM logic_nodes WHERE id = ?1 LIMIT 1",
         )?;
         let mut rows = stmt.query(params![node_id])?;
@@ -921,10 +964,62 @@ impl Storage {
                 node_type: str_to_logic_node_type(&row.get::<_, String>(2)?),
                 start_line: row.get::<_, i64>(3)? as usize,
                 end_line: row.get::<_, i64>(4)? as usize,
+                semantic_label: row.get(5)?,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_control_flow_edges(&self, symbol_id: i64) -> Result<Vec<FlowEdgeRecord>> {
+        self.get_flow_edges("control_flow_edges", symbol_id)
+    }
+
+    pub fn get_data_flow_edges(&self, symbol_id: i64) -> Result<Vec<FlowEdgeRecord>> {
+        self.get_flow_edges("data_flow_edges", symbol_id)
+    }
+
+    pub fn get_logic_clusters(&self, symbol_id: i64) -> Result<Vec<LogicClusterRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, symbol_id, label, start_line, end_line, node_count
+             FROM logic_clusters
+             WHERE symbol_id = ?1
+             ORDER BY start_line, end_line, id",
+        )?;
+        let rows = stmt.query_map(params![symbol_id], |row| {
+            Ok(LogicClusterRecord {
+                id: row.get(0)?,
+                symbol_id: row.get(1)?,
+                label: row.get(2)?,
+                start_line: row.get::<_, i64>(3)? as usize,
+                end_line: row.get::<_, i64>(4)? as usize,
+                node_count: row.get::<_, i64>(5)? as usize,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
+    }
+
+    fn get_flow_edges(&self, table: &str, symbol_id: i64) -> Result<Vec<FlowEdgeRecord>> {
+        let sql = format!(
+            "SELECT id, symbol_id, from_node_id, to_node_id, kind, variable_name
+             FROM {table}
+             WHERE symbol_id = ?1
+             ORDER BY from_node_id, to_node_id, id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![symbol_id], |row| {
+            Ok(FlowEdgeRecord {
+                id: row.get(0)?,
+                symbol_id: row.get(1)?,
+                from_node_id: row.get(2)?,
+                to_node_id: row.get(3)?,
+                kind: str_to_flow_edge_kind(&row.get::<_, String>(4)?),
+                variable_name: row.get(5)?,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
     }
 
     pub fn get_logic_node_file(&self, node_id: i64) -> Result<Option<String>> {
@@ -1054,6 +1149,120 @@ fn str_to_logic_node_type(value: &str) -> LogicNodeType {
     }
 }
 
+fn flow_edge_kind_to_str(kind: &FlowEdgeKind) -> &'static str {
+    match kind {
+        FlowEdgeKind::Next => "next",
+        FlowEdgeKind::Branch => "branch",
+        FlowEdgeKind::LoopBack => "loop_back",
+        FlowEdgeKind::Exception => "exception",
+        FlowEdgeKind::AssignmentToUse => "assignment_to_use",
+        FlowEdgeKind::AssignmentToReturn => "assignment_to_return",
+        FlowEdgeKind::CallResult => "call_result",
+    }
+}
+
+fn str_to_flow_edge_kind(value: &str) -> FlowEdgeKind {
+    match value {
+        "next" => FlowEdgeKind::Next,
+        "branch" => FlowEdgeKind::Branch,
+        "loop_back" => FlowEdgeKind::LoopBack,
+        "exception" => FlowEdgeKind::Exception,
+        "assignment_to_return" => FlowEdgeKind::AssignmentToReturn,
+        "call_result" => FlowEdgeKind::CallResult,
+        _ => FlowEdgeKind::AssignmentToUse,
+    }
+}
+
+fn ensure_runtime_migrations(conn: &Connection) -> Result<()> {
+    let _ = conn.execute(
+        "ALTER TABLE logic_nodes ADD COLUMN semantic_label TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE control_flow_edges ADD COLUMN variable_name TEXT",
+        [],
+    );
+    Ok(())
+}
+
+fn insert_flow_edges_tx(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    edges: &[FlowEdgeRecord],
+    inserted_nodes: &[LogicNodeRecord],
+) -> Result<()> {
+    let mut node_map = HashMap::new();
+    for node in inserted_nodes {
+        node_map.insert(
+            provisional_node_id(node.symbol_id, node.start_line, node.end_line),
+            node.id.unwrap_or_default(),
+        );
+    }
+
+    let sql = format!(
+        "INSERT INTO {table}(symbol_id, from_node_id, to_node_id, kind, variable_name)
+         VALUES(?1, ?2, ?3, ?4, ?5)"
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    for edge in edges {
+        let symbol_id = remap_symbol_id(edge.symbol_id, inserted_nodes);
+        let Some(from_node_id) = node_map.get(&edge.from_node_id).copied() else {
+            continue;
+        };
+        let Some(to_node_id) = node_map.get(&edge.to_node_id).copied() else {
+            continue;
+        };
+        stmt.execute(params![
+            symbol_id,
+            from_node_id,
+            to_node_id,
+            flow_edge_kind_to_str(&edge.kind),
+            edge.variable_name,
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_logic_clusters_tx(
+    tx: &rusqlite::Transaction<'_>,
+    clusters: &[LogicClusterRecord],
+    inserted_symbol_ids: &[i64],
+) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO logic_clusters(symbol_id, label, start_line, end_line, node_count)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for cluster in clusters {
+        let symbol_idx = (cluster.symbol_id - 1).max(0) as usize;
+        let Some(symbol_id) = inserted_symbol_ids.get(symbol_idx).copied() else {
+            continue;
+        };
+        stmt.execute(params![
+            symbol_id,
+            cluster.label,
+            cluster.start_line as i64,
+            cluster.end_line as i64,
+            cluster.node_count as i64,
+        ])?;
+    }
+    Ok(())
+}
+
+fn provisional_node_id(symbol_id: i64, start_line: usize, end_line: usize) -> i64 {
+    symbol_id * 1_000_000 + (start_line as i64 * 1_000) + end_line as i64
+}
+
+fn remap_symbol_id(temp_symbol_id: i64, inserted_nodes: &[LogicNodeRecord]) -> i64 {
+    inserted_nodes
+        .iter()
+        .find(|node| {
+            let provisional = provisional_node_id(temp_symbol_id, node.start_line, node.end_line);
+            provisional / 1_000_000 == temp_symbol_id
+        })
+        .map(|node| node.symbol_id)
+        .unwrap_or_default()
+}
+
 pub fn default_paths(base: &Path) -> (PathBuf, PathBuf) {
     (
         base.join(".semantic").join("semantic.db"),
@@ -1101,6 +1310,7 @@ mod tests {
                     node_type: LogicNodeType::Return,
                     start_line: 3,
                     end_line: 3,
+                    semantic_label: "result_exit".to_string(),
                 }],
             )
             .expect("insert logic nodes");

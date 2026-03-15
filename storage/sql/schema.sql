@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS logic_nodes (
     node_type TEXT NOT NULL,
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
+    semantic_label TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(symbol_id) REFERENCES symbols(id)
 );
 CREATE INDEX IF NOT EXISTS idx_logic_symbol ON logic_nodes(symbol_id);
@@ -48,6 +49,46 @@ CREATE TABLE IF NOT EXISTS logic_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_logic_from ON logic_edges(from_node_id);
 CREATE INDEX IF NOT EXISTS idx_logic_to ON logic_edges(to_node_id);
+
+CREATE TABLE IF NOT EXISTS control_flow_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_id INTEGER NOT NULL,
+    from_node_id INTEGER NOT NULL,
+    to_node_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    variable_name TEXT,
+    FOREIGN KEY(symbol_id) REFERENCES symbols(id),
+    FOREIGN KEY(from_node_id) REFERENCES logic_nodes(id),
+    FOREIGN KEY(to_node_id) REFERENCES logic_nodes(id)
+);
+CREATE INDEX IF NOT EXISTS idx_cfg_symbol ON control_flow_edges(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_cfg_from ON control_flow_edges(from_node_id);
+
+CREATE TABLE IF NOT EXISTS data_flow_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_id INTEGER NOT NULL,
+    from_node_id INTEGER NOT NULL,
+    to_node_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    variable_name TEXT,
+    FOREIGN KEY(symbol_id) REFERENCES symbols(id),
+    FOREIGN KEY(from_node_id) REFERENCES logic_nodes(id),
+    FOREIGN KEY(to_node_id) REFERENCES logic_nodes(id)
+);
+CREATE INDEX IF NOT EXISTS idx_dfg_symbol ON data_flow_edges(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_dfg_from ON data_flow_edges(from_node_id);
+CREATE INDEX IF NOT EXISTS idx_dfg_var ON data_flow_edges(variable_name);
+
+CREATE TABLE IF NOT EXISTS logic_clusters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_id INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    node_count INTEGER NOT NULL,
+    FOREIGN KEY(symbol_id) REFERENCES symbols(id)
+);
+CREATE INDEX IF NOT EXISTS idx_logic_cluster_symbol ON logic_clusters(symbol_id);
 
 CREATE TABLE IF NOT EXISTS modules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
