@@ -137,6 +137,12 @@ fn find_target_symbol(
         let sym_tokens: Vec<&str> = sym_norm.split_whitespace().collect();
         let multi_token_symbol = sym_tokens.len() >= 2;
         let short_single_token = sym_tokens.len() == 1 && sym_tokens[0].len() <= 3;
+        let generic_entrypoint = matches!(
+            sym_norm.as_str(),
+            "app" | "index" | "main" | "bootstrap" | "home" | "root" | "render"
+        );
+        let explicit_symbol_request =
+            q_lc.contains(&sym_lc) || (!sym_norm.is_empty() && q_norm.contains(&sym_norm));
 
         let mut score = 0i64;
         if q_lc.contains(&sym_lc) {
@@ -167,6 +173,9 @@ fn find_target_symbol(
         score += overlap * 5;
         if short_single_token {
             score -= 30;
+        }
+        if generic_entrypoint && !explicit_symbol_request {
+            score -= 70;
         }
         if !preferred_norm.is_empty() && sym_norm == preferred_norm {
             score += 50;

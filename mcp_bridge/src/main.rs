@@ -153,42 +153,88 @@ async fn call_tool(
 }
 
 async fn list_tools() -> Json<serde_json::Value> {
-    let tools: Vec<MCPToolSpec> = vec![
-        MCPToolSpec { name: "llm_tools", method: "GET", endpoint: "/llm_tools", notes: None },
-        MCPToolSpec { name: "debug_failure", method: "POST", endpoint: "/debug_failure", notes: None },
-        MCPToolSpec { name: "debug_graph", method: "GET", endpoint: "/debug_graph", notes: None },
-        MCPToolSpec { name: "root_cause_candidates", method: "GET", endpoint: "/root_cause_candidates", notes: None },
-        MCPToolSpec { name: "test_gaps", method: "GET", endpoint: "/test_gaps", notes: None },
-        MCPToolSpec { name: "generate_tests", method: "POST", endpoint: "/generate_tests", notes: None },
-        MCPToolSpec { name: "apply_tests", method: "POST", endpoint: "/apply_tests", notes: None },
-        MCPToolSpec { name: "pipeline_graph", method: "GET", endpoint: "/pipeline_graph", notes: None },
-        MCPToolSpec { name: "analyze_pipeline", method: "POST", endpoint: "/analyze_pipeline", notes: None },
-        MCPToolSpec { name: "deployment_history", method: "GET", endpoint: "/deployment_history", notes: None },
-        MCPToolSpec { name: "performance_stats", method: "GET", endpoint: "/performance_stats", notes: None },
-        MCPToolSpec { name: "ide_autoroute", method: "POST", endpoint: "/ide_autoroute", notes: Some("semantic-first IDE entrypoint; default reference_only=true; accepts task/session_id/max_tokens/single_file_fast_path/reference_only/auto_minimal_raw") },
-        MCPToolSpec { name: "semantic_first", method: "POST", endpoint: "/ide_autoroute", notes: Some("alias of ide_autoroute") },
-        MCPToolSpec { name: "control_flow_hints", method: "GET", endpoint: "/control_flow_hints", notes: Some("query param: symbol") },
-        MCPToolSpec { name: "data_flow_hints", method: "GET", endpoint: "/data_flow_hints", notes: Some("query param: symbol") },
-        MCPToolSpec { name: "hybrid_ranked_context", method: "POST", endpoint: "/hybrid_ranked_context", notes: None },
+    // Primary tools (2-tool surface)
+    let primary: Vec<MCPToolSpec> = vec![
+        MCPToolSpec {
+            name: "retrieve",
+            method: "POST",
+            endpoint: "/retrieve",
+            notes: Some(
+                "Unified retrieval tool. Pass `operation` to select behaviour: \
+                GetRepoMap | GetFileOutline | SearchSymbol | GetCodeSpan | GetLogicNodes | \
+                GetDependencyNeighborhood | GetReasoningContext | GetPlannedContext | PlanSafeEdit | \
+                GetControlFlowHints (name=symbol) | GetDataFlowHints (name=symbol) | \
+                GetHybridRankedContext (query, max_tokens) | GetDebugGraph | GetPipelineGraph | \
+                GetRootCauseCandidates | GetTestGaps | GetDeploymentHistory | GetPerformanceStats. \
+                Supports single_file_fast_path, reference_only, mapping_mode, session_id.",
+            ),
+        },
+        MCPToolSpec {
+            name: "ide_autoroute",
+            method: "POST",
+            endpoint: "/ide_autoroute",
+            notes: Some(
+                "Semantic-first IDE entrypoint. Two modes: \
+                (1) Intent routing: pass `task` (free-text) — auto-detects intent and retrieves context. \
+                Accepts session_id, max_tokens, single_file_fast_path, reference_only, auto_minimal_raw. \
+                (2) Action dispatch: pass `action` + `action_input` — actions: \
+                debug_failure (event_id, repository, timestamp, failure_type, stack_trace, error_message) | \
+                generate_tests (target_symbol, framework?) | \
+                apply_tests (repository, target_symbol, framework?) | \
+                analyze_pipeline (failure_stage, failure_message).",
+            ),
+        },
+    ];
+
+    // Legacy aliases kept for backward compatibility
+    let legacy: Vec<MCPToolSpec> = vec![
+        MCPToolSpec { name: "semantic_first", method: "POST", endpoint: "/ide_autoroute", notes: Some("legacy alias of ide_autoroute") },
+        MCPToolSpec { name: "debug_failure", method: "POST", endpoint: "/debug_failure", notes: Some("legacy — use ide_autoroute with action=debug_failure") },
+        MCPToolSpec { name: "debug_graph", method: "GET", endpoint: "/debug_graph", notes: Some("legacy — use retrieve with operation=GetDebugGraph") },
+        MCPToolSpec { name: "root_cause_candidates", method: "GET", endpoint: "/root_cause_candidates", notes: Some("legacy — use retrieve with operation=GetRootCauseCandidates") },
+        MCPToolSpec { name: "test_gaps", method: "GET", endpoint: "/test_gaps", notes: Some("legacy — use retrieve with operation=GetTestGaps") },
+        MCPToolSpec { name: "generate_tests", method: "POST", endpoint: "/generate_tests", notes: Some("legacy — use ide_autoroute with action=generate_tests") },
+        MCPToolSpec { name: "apply_tests", method: "POST", endpoint: "/apply_tests", notes: Some("legacy — use ide_autoroute with action=apply_tests") },
+        MCPToolSpec { name: "pipeline_graph", method: "GET", endpoint: "/pipeline_graph", notes: Some("legacy — use retrieve with operation=GetPipelineGraph") },
+        MCPToolSpec { name: "analyze_pipeline", method: "POST", endpoint: "/analyze_pipeline", notes: Some("legacy — use ide_autoroute with action=analyze_pipeline") },
+        MCPToolSpec { name: "deployment_history", method: "GET", endpoint: "/deployment_history", notes: Some("legacy — use retrieve with operation=GetDeploymentHistory") },
+        MCPToolSpec { name: "performance_stats", method: "GET", endpoint: "/performance_stats", notes: Some("legacy — use retrieve with operation=GetPerformanceStats") },
+        MCPToolSpec { name: "control_flow_hints", method: "GET", endpoint: "/control_flow_hints", notes: Some("legacy — use retrieve with operation=GetControlFlowHints and name=symbol") },
+        MCPToolSpec { name: "data_flow_hints", method: "GET", endpoint: "/data_flow_hints", notes: Some("legacy — use retrieve with operation=GetDataFlowHints and name=symbol") },
+        MCPToolSpec { name: "hybrid_ranked_context", method: "POST", endpoint: "/hybrid_ranked_context", notes: Some("legacy — use retrieve with operation=GetHybridRankedContext") },
         MCPToolSpec { name: "ab_test_dev", method: "POST", endpoint: "/ab_test_dev", notes: Some("accepts single_file_fast_path=true|false") },
         MCPToolSpec { name: "ab_test_dev_results", method: "GET", endpoint: "/ab_test_dev", notes: None },
-        MCPToolSpec { name: "get_repo_map", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "get_file_outline", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "search_symbol", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "get_code_span", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "get_logic_nodes", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "get_dependency_neighborhood", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "get_reasoning_context", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "get_planned_context", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
-        MCPToolSpec { name: "plan_safe_edit", method: "POST", endpoint: "/retrieve", notes: Some("supports single_file_fast_path") },
+        MCPToolSpec { name: "llm_tools", method: "GET", endpoint: "/llm_tools", notes: None },
+        MCPToolSpec { name: "get_repo_map", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetRepoMap") },
+        MCPToolSpec { name: "get_file_outline", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetFileOutline") },
+        MCPToolSpec { name: "search_symbol", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=SearchSymbol") },
+        MCPToolSpec { name: "get_code_span", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetCodeSpan") },
+        MCPToolSpec { name: "get_logic_nodes", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetLogicNodes") },
+        MCPToolSpec { name: "get_dependency_neighborhood", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetDependencyNeighborhood") },
+        MCPToolSpec { name: "get_reasoning_context", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetReasoningContext") },
+        MCPToolSpec { name: "get_planned_context", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetPlannedContext") },
+        MCPToolSpec { name: "plan_safe_edit", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=PlanSafeEdit") },
     ];
-    Json(serde_json::json!({"ok": true, "tools": tools}))
+
+    Json(serde_json::json!({"ok": true, "tools": primary, "legacy_tools": legacy}))
 }
 
 fn resolve_tool_request(
     name: &str,
     input: serde_json::Value,
 ) -> Result<(&'static str, &'static str, Option<serde_json::Value>), (StatusCode, String)> {
+    // Primary tool: "retrieve" — pass input directly to /retrieve (caller supplies `operation`)
+    if name == "retrieve" {
+        let mut payload = match input {
+            serde_json::Value::Object(map) => serde_json::Value::Object(map),
+            _ => serde_json::json!({}),
+        };
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("semantic_enabled".to_string())
+                .or_insert(serde_json::json!(true));
+        }
+        return Ok(("POST", "/retrieve", Some(payload)));
+    }
     if let Ok((method, endpoint)) = map_tool(name) {
         return Ok((method, endpoint, Some(input)));
     }
@@ -234,6 +280,9 @@ fn map_tool(name: &str) -> Result<(&'static str, &'static str), (StatusCode, Str
 
 fn map_retrieve_operation(name: &str) -> Option<&'static str> {
     match name {
+        // Primary tool: caller passes operation directly — pass through as-is
+        "retrieve" => None, // handled by pass-through in resolve_tool_request
+        // Legacy named tools
         "get_repo_map" => Some("GetRepoMap"),
         "get_file_outline" => Some("GetFileOutline"),
         "search_symbol" => Some("SearchSymbol"),
@@ -243,6 +292,16 @@ fn map_retrieve_operation(name: &str) -> Option<&'static str> {
         "get_reasoning_context" => Some("GetReasoningContext"),
         "get_planned_context" => Some("GetPlannedContext"),
         "plan_safe_edit" => Some("PlanSafeEdit"),
+        // New unified operations (also accessible via legacy names)
+        "get_control_flow_hints" => Some("GetControlFlowHints"),
+        "get_data_flow_hints" => Some("GetDataFlowHints"),
+        "get_hybrid_ranked_context" => Some("GetHybridRankedContext"),
+        "get_debug_graph" => Some("GetDebugGraph"),
+        "get_pipeline_graph" => Some("GetPipelineGraph"),
+        "get_root_cause_candidates" => Some("GetRootCauseCandidates"),
+        "get_test_gaps" => Some("GetTestGaps"),
+        "get_deployment_history" => Some("GetDeploymentHistory"),
+        "get_performance_stats" => Some("GetPerformanceStats"),
         _ => None,
     }
 }

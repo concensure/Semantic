@@ -12,19 +12,27 @@ Primary goals:
 - impact-aware edits across dependent symbols/files
 - lower repeated context cost via indexed retrieval and scoped calls
 
+## Two-Tool Surface (MCP)
+
+The MCP bridge exposes **two primary tools** that cover all use cases:
+
+| Tool | When to use |
+|------|-------------|
+| `retrieve` | Any precise, operation-specific query. Pass `operation` to select behaviour. |
+| `ide_autoroute` | Intent-driven routing (pass `task`) **or** action dispatch (pass `action` + `action_input`). |
+
+Legacy named tools (`get_repo_map`, `debug_failure`, etc.) remain available for backward compatibility but are deprecated in favour of the two-tool surface.
+
 ## Entry Points
 
 - Direct API:
-  - `POST /retrieve` for retrieval operations
+  - `POST /retrieve` for all retrieval and graph operations
+  - `POST /ide_autoroute` for intent routing and action dispatch
   - `PATCH /edit` for safe edit planning/execution
   - `GET /llm_tools` for discoverable tool metadata
-  - `POST /ide_autoroute` for IDE-native semantic-first routing
-  - `GET /performance_stats` for runtime hardening metrics
-  - `GET /control_flow_hints?symbol=...` for control-flow hints
-  - `GET /data_flow_hints?symbol=...` for data-flow hints
-  - `POST /hybrid_ranked_context` for hybrid ranked context retrieval
+  - Legacy dedicated endpoints remain for backward compatibility
 - MCP bridge:
-  - `GET /mcp/tools`
+  - `GET /mcp/tools` — returns `tools` (primary) and `legacy_tools`
   - `POST /mcp/tools/call`
 
 ## Core Retrieval Operations (`POST /retrieve`)
@@ -62,6 +70,15 @@ Supported operations and when to use them:
 - `search_semantic_symbol`: semantic fallback search when lexical misses (`query`)
 - `get_workspace_reasoning_context`: cross-repository/workspace context (`query`)
 - `plan_safe_edit`: impact-aware patch planning (`name`/`query`, `edit_description`)
+- `get_control_flow_hints`: control-flow hints for a symbol (`name` or `query` = symbol name)
+- `get_data_flow_hints`: data-flow hints for a symbol (`name` or `query` = symbol name)
+- `get_hybrid_ranked_context`: hybrid ranked context (`query`, optional `max_tokens`)
+- `get_debug_graph`: current debug failure graph (no params)
+- `get_pipeline_graph`: CI/CD pipeline graph (no params)
+- `get_root_cause_candidates`: root cause candidates from debug graph (no params)
+- `get_test_gaps`: symbols lacking test coverage (no params)
+- `get_deployment_history`: deployment history (no params)
+- `get_performance_stats`: retrieval performance metrics (no params)
 
 ## Edit Path (`PATCH /edit`)
 
@@ -109,20 +126,24 @@ Call:
 - `POST /mcp/tools/call`
 - header: `x-mcp-token: <LOCAL_BRIDGE_TOKEN>`
 
-Common MCP tool names:
+Primary MCP tools (2-tool surface):
 
-- `llm_tools`
-- `get_repo_map`
-- `get_file_outline`
-- `search_symbol`
-- `get_code_span`
-- `get_logic_nodes`
-- `get_dependency_neighborhood`
-- `get_reasoning_context`
-- `get_planned_context`
-- `plan_safe_edit`
-- `ab_test_dev`
-- `ab_test_dev_results`
+- `retrieve` — pass `operation` field (see full list above)
+- `ide_autoroute` — pass `task` for intent routing, or `action` + `action_input` for action dispatch
+
+Available `action` values for `ide_autoroute`:
+- `debug_failure` — `action_input`: `{event_id, repository, timestamp, failure_type, stack_trace, error_message}`
+- `generate_tests` — `action_input`: `{target_symbol, framework?}`
+- `apply_tests` — `action_input`: `{repository, target_symbol, framework?}`
+- `analyze_pipeline` — `action_input`: `{failure_stage, failure_message}`
+
+Legacy MCP tools (backward compatible, deprecated):
+- `get_repo_map`, `get_file_outline`, `search_symbol`, `get_code_span`, `get_logic_nodes`
+- `get_dependency_neighborhood`, `get_reasoning_context`, `get_planned_context`, `plan_safe_edit`
+- `debug_failure`, `generate_tests`, `apply_tests`, `analyze_pipeline`
+- `debug_graph`, `root_cause_candidates`, `test_gaps`, `pipeline_graph`, `deployment_history`
+- `performance_stats`, `control_flow_hints`, `data_flow_hints`, `hybrid_ranked_context`
+- `ab_test_dev`, `ab_test_dev_results`, `llm_tools`, `semantic_first`
 
 ## Suggested Call Sequence in IDE Agents
 

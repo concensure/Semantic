@@ -30,13 +30,20 @@ cargo run -p api -- ./test_repo
 
 Service binds to `$SEMANTIC_API_BASE_URL`.
 
-New semantic-first/IDE endpoints:
+## Two-Tool MCP Surface
 
-- `POST /ide_autoroute`
-- `GET /performance_stats`
-- `GET /control_flow_hints?symbol=...`
-- `GET /data_flow_hints?symbol=...`
-- `POST /hybrid_ranked_context`
+The MCP bridge (`mcp_bridge`) exposes **two primary tools** that cover all use cases:
+
+- **`retrieve`** — unified retrieval. Pass `operation` to select: `GetRepoMap`, `GetFileOutline`, `SearchSymbol`, `GetCodeSpan`, `GetLogicNodes`, `GetDependencyNeighborhood`, `GetReasoningContext`, `GetPlannedContext`, `PlanSafeEdit`, `GetControlFlowHints`, `GetDataFlowHints`, `GetHybridRankedContext`, `GetDebugGraph`, `GetPipelineGraph`, `GetRootCauseCandidates`, `GetTestGaps`, `GetDeploymentHistory`, `GetPerformanceStats`.
+- **`ide_autoroute`** — intent routing (`task`) or action dispatch (`action` + `action_input`). Actions: `debug_failure`, `generate_tests`, `apply_tests`, `analyze_pipeline`.
+
+All 27 legacy named tools remain available for backward compatibility (see `GET /mcp/tools` → `legacy_tools`).
+
+Key API endpoints:
+
+- `POST /retrieve` — all retrieval and graph operations
+- `POST /ide_autoroute` — intent routing and action dispatch
+- `PATCH /edit` — safe edit planning/execution
 
 Default retrieval behavior:
 

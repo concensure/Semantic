@@ -12,7 +12,7 @@ use engine::{Operation, PatchApplicationMode, RetrievalRequest, RetrievalRespons
 use indexer::Indexer;
 use parking_lot::Mutex;
 use retrieval::RetrievalService;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,14 +28,24 @@ struct AppState {
 
 struct SemanticMiddlewareState {
     semantic_first_enabled: bool,
-    retrieved_sessions: HashSet<String>,
+    sessions: HashMap<String, SessionContextState>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionContextState {
+    last_seen_epoch_s: u64,
+    index_revision: u64,
+    accepted_refs: HashSet<String>,
+    accepted_order: VecDeque<String>,
+    last_target_symbols: VecDeque<String>,
+    intent_symbol_cache: HashMap<String, String>,
 }
 
 impl Default for SemanticMiddlewareState {
     fn default() -> Self {
         Self {
             semantic_first_enabled: true,
-            retrieved_sessions: HashSet::new(),
+            sessions: HashMap::new(),
         }
     }
 }
@@ -124,10 +134,159 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
+const SESSION_TTL_SECS: u64 = 20 * 60;
+const MAX_SESSION_CONTEXT_ENTRIES: usize = 200;
+
+fn now_epoch_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+fn touch_or_create_session<'a>(
+    middleware: &'a mut SemanticMiddlewareState,
+    session_id: &str,
+    index_revision: u64,
+) -> &'a mut SessionContextState {
+    let now = now_epoch_s();
+    middleware
+        .sessions
+        .retain(|_, v| now.saturating_sub(v.last_seen_epoch_s) <= SESSION_TTL_SECS);
+    let entry = middleware
+        .sessions
+        .entry(session_id.to_string())
+        .or_insert_with(|| SessionContextState {
+            last_seen_epoch_s: now,
+            index_revision,
+            accepted_refs: HashSet::new(),
+            accepted_order: VecDeque::new(),
+            last_target_symbols: VecDeque::new(),
+            intent_symbol_cache: HashMap::new(),
+        });
+    if entry.index_revision != index_revision {
+        entry.index_revision = index_revision;
+        entry.accepted_refs.clear();
+        entry.accepted_order.clear();
+        entry.last_target_symbols.clear();
+        entry.intent_symbol_cache.clear();
+    }
+    entry.last_seen_epoch_s = now;
+    entry
+}
+
+fn apply_session_context_reuse(
+    result: &mut serde_json::Value,
+    session: &mut SessionContextState,
+) -> usize {
+    let Some(context) = result.get_mut("context").and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let mut filtered = Vec::new();
+    let mut reused = 0usize;
+    for item in context.drain(..) {
+        let file = item
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let start = item.get("start").and_then(|v| v.as_u64()).unwrap_or_default();
+        let end = item.get("end").and_then(|v| v.as_u64()).unwrap_or_default();
+        let key = format!("{file}:{start}-{end}");
+        if file.is_empty() || start == 0 || end == 0 {
+            filtered.push(item);
+            continue;
+        }
+        if session.accepted_refs.contains(&key) {
+            reused += 1;
+            continue;
+        }
+        session.accepted_refs.insert(key.clone());
+        session.accepted_order.push_back(key);
+        while session.accepted_order.len() > MAX_SESSION_CONTEXT_ENTRIES {
+            if let Some(old) = session.accepted_order.pop_front() {
+                session.accepted_refs.remove(&old);
+            }
+        }
+        filtered.push(item);
+    }
+    *context = filtered;
+    reused
+}
+
 async fn retrieve(
     State(state): State<AppState>,
     Json(body): Json<RetrieveRequestBody>,
 ) -> Json<serde_json::Value> {
+    // Dispatch unified operations that were previously separate endpoints
+    match &body.request.operation {
+        Operation::GetControlFlowHints => {
+            let symbol = body.request.name.clone()
+                .or_else(|| body.request.query.clone())
+                .unwrap_or_default();
+            return match state.retrieval.lock().get_control_flow_hints(&symbol) {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_control_flow_hints", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetDataFlowHints => {
+            let symbol = body.request.name.clone()
+                .or_else(|| body.request.query.clone())
+                .unwrap_or_default();
+            return match state.retrieval.lock().get_data_flow_hints(&symbol) {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_data_flow_hints", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetHybridRankedContext => {
+            let query = body.request.query.clone().unwrap_or_default();
+            let max_tokens = body.request.max_tokens.unwrap_or(1400);
+            let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
+            return match state.retrieval.lock().get_hybrid_ranked_context(&query, max_tokens, single_file_fast_path) {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_hybrid_ranked_context", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetDebugGraph => {
+            return match state.retrieval.lock().get_debug_graph() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_debug_graph", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetPipelineGraph => {
+            return match state.retrieval.lock().get_pipeline_graph() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_pipeline_graph", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetRootCauseCandidates => {
+            return match state.retrieval.lock().get_root_cause_candidates() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_root_cause_candidates", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetTestGaps => {
+            return match state.retrieval.lock().get_test_gaps() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_test_gaps", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetDeploymentHistory => {
+            return match state.retrieval.lock().get_deployment_history() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_deployment_history", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+            };
+        }
+        Operation::GetPerformanceStats => {
+            return Json(serde_json::json!({
+                "ok": true,
+                "operation": "get_performance_stats",
+                "result": state.retrieval.lock().get_performance_stats()
+            }));
+        }
+        _ => {}
+    }
+
     if body.semantic_enabled == Some(false) {
         return Json(serde_json::json!({
             "ok": true,
@@ -154,22 +313,46 @@ async fn retrieve(
         }
     }
 
+    let query_for_session = request.query.clone();
     let result = state
         .retrieval
         .lock()
-        .handle_with_options(
+        .handle_with_options_ext(
             request,
             body.single_file_fast_path,
             Some(!body.reference_only.unwrap_or(true)),
+            body.mapping_mode.as_deref(),
+            body.max_footprint_items,
         );
-    if result.is_ok() {
-        if let Some(session_id) = body.session_id.as_ref() {
-            let mut middleware = state.semantic_middleware.lock();
-            middleware.retrieved_sessions.insert(session_id.clone());
-        }
-    }
     match result {
-        Ok(response) => Json(success(response)),
+        Ok(mut response) => {
+            let mut reused_context_count = 0usize;
+            if let Some(session_id) = body.session_id.as_ref() {
+                let index_revision = state.retrieval.lock().index_revision();
+                let mut middleware = state.semantic_middleware.lock();
+                let session = touch_or_create_session(&mut middleware, session_id, index_revision);
+                if body.reuse_session_context.unwrap_or(true) {
+                    reused_context_count = apply_session_context_reuse(&mut response.result, session);
+                }
+                if let Some(symbol) = response.result.get("symbol").and_then(|v| v.as_str()) {
+                    session.last_target_symbols.push_back(symbol.to_string());
+                    while session.last_target_symbols.len() > 32 {
+                        session.last_target_symbols.pop_front();
+                    }
+                }
+                if let Some(query) = query_for_session.as_ref() {
+                    if let Some(symbol) = response.result.get("symbol").and_then(|v| v.as_str()) {
+                        session
+                            .intent_symbol_cache
+                            .insert(query.to_lowercase(), symbol.to_string());
+                    }
+                }
+            }
+            if let Some(obj) = response.result.as_object_mut() {
+                obj.insert("reused_context_count".to_string(), serde_json::json!(reused_context_count));
+            }
+            Json(success(response))
+        }
         Err(err) => {
             error!("retrieval failed: {err}");
             Json(serde_json::json!({
@@ -189,6 +372,9 @@ struct RetrieveRequestBody {
     original_query: Option<String>,
     single_file_fast_path: Option<bool>,
     reference_only: Option<bool>,
+    mapping_mode: Option<String>,
+    max_footprint_items: Option<usize>,
+    reuse_session_context: Option<bool>,
     session_id: Option<String>,
 }
 
@@ -212,11 +398,19 @@ fn should_block_compressed_semantic(operation: &Operation) -> bool {
 
 #[derive(Debug, serde::Deserialize)]
 struct IdeAutoRouteRequest {
-    task: String,
+    /// Optional free-text task description (used for context retrieval / intent detection).
+    task: Option<String>,
+    /// Action-oriented dispatch: "debug_failure" | "generate_tests" | "apply_tests" | "analyze_pipeline"
+    action: Option<String>,
+    /// Payload for action-oriented calls (replaces per-action request bodies).
+    action_input: Option<serde_json::Value>,
     session_id: Option<String>,
     max_tokens: Option<usize>,
     single_file_fast_path: Option<bool>,
     reference_only: Option<bool>,
+    mapping_mode: Option<String>,
+    max_footprint_items: Option<usize>,
+    reuse_session_context: Option<bool>,
     auto_minimal_raw: Option<bool>,
 }
 
@@ -224,16 +418,77 @@ async fn ide_autoroute(
     State(state): State<AppState>,
     Json(body): Json<IdeAutoRouteRequest>,
 ) -> Json<serde_json::Value> {
-    let intent = detect_ide_intent(&body.task);
+    // Action-oriented dispatch: handle structured actions before intent-based routing
+    if let Some(ref action) = body.action {
+        let input = body.action_input.clone().unwrap_or_else(|| serde_json::json!({}));
+        return match action.as_str() {
+            "debug_failure" => {
+                let event_id = input.get("event_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let repository = input.get("repository").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let timestamp = input.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+                let failure_type = input.get("failure_type").and_then(|v| v.as_str()).unwrap_or("runtime_exception").to_string();
+                let stack_trace: Vec<String> = input.get("stack_trace")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let error_message = input.get("error_message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let event = debug_graph::FailureEvent {
+                    event_id,
+                    repository,
+                    timestamp,
+                    failure_type: parse_failure_type(&failure_type),
+                    stack_trace,
+                    error_message,
+                };
+                match state.retrieval.lock().debug_failure(event) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "debug_failure", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "debug_failure", "error": err.to_string()})),
+                }
+            }
+            "generate_tests" => {
+                let target_symbol = input.get("target_symbol").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let framework = input.get("framework").and_then(|v| v.as_str()).unwrap_or("rust-test").to_string();
+                match state.retrieval.lock().generate_tests(&target_symbol, &framework) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "generate_tests", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "generate_tests", "error": err.to_string()})),
+                }
+            }
+            "apply_tests" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let target_symbol = input.get("target_symbol").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let framework = input.get("framework").and_then(|v| v.as_str()).unwrap_or("rust-test").to_string();
+                match state.retrieval.lock().apply_tests(&repository, &target_symbol, &framework) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "apply_tests", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "apply_tests", "error": err.to_string()})),
+                }
+            }
+            "analyze_pipeline" => {
+                let failure_stage = input.get("failure_stage").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let failure_message = input.get("failure_message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let request = pipeline_graph::PipelineAnalysisRequest { failure_stage, failure_message };
+                match state.retrieval.lock().analyze_pipeline(request) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "analyze_pipeline", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "analyze_pipeline", "error": err.to_string()})),
+                }
+            }
+            unknown => Json(serde_json::json!({"ok": false, "error": format!("unknown action '{unknown}'")})),
+        };
+    }
+
+    let task = body.task.clone().unwrap_or_default();
+    let intent = detect_ide_intent(&task);
     let max_tokens = body.max_tokens.unwrap_or(1400);
     let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
     let reference_only = body.reference_only.unwrap_or(true);
+    let mapping_mode = body.mapping_mode.clone();
+    let max_footprint_items = body.max_footprint_items;
+    let reuse_session_context = body.reuse_session_context.unwrap_or(true);
     let auto_minimal_raw = body.auto_minimal_raw.unwrap_or(true);
 
     let planned_request = RetrievalRequest {
         operation: Operation::GetPlannedContext,
         name: None,
-        query: Some(body.task.clone()),
+        query: Some(task.clone()),
         file: None,
         start_line: None,
         end_line: None,
@@ -252,10 +507,12 @@ async fn ide_autoroute(
     let planned = state
         .retrieval
         .lock()
-        .handle_with_options(
+        .handle_with_options_ext(
             planned_request,
             Some(single_file_fast_path),
             Some(!reference_only),
+            mapping_mode.as_deref(),
+            max_footprint_items,
         );
 
     let (selected_tool, mut result) = match planned {
@@ -264,7 +521,7 @@ async fn ide_autoroute(
             let fallback = RetrievalRequest {
                 operation: Operation::SearchSemanticSymbol,
                 name: None,
-                query: Some(body.task.clone()),
+                query: Some(task.clone()),
                 file: None,
                 start_line: None,
                 end_line: None,
@@ -293,15 +550,41 @@ async fn ide_autoroute(
         }
     };
 
+    let mut reused_context_count = 0usize;
     if let Some(session_id) = body.session_id {
+        let index_revision = state.retrieval.lock().index_revision();
         let mut middleware = state.semantic_middleware.lock();
-        middleware.retrieved_sessions.insert(session_id);
+        let session = touch_or_create_session(&mut middleware, &session_id, index_revision);
+        if reuse_session_context {
+            reused_context_count = apply_session_context_reuse(&mut result, session);
+        }
+        if let Some(symbol) = result.get("symbol").and_then(|v| v.as_str()) {
+            session.last_target_symbols.push_back(symbol.to_string());
+            while session.last_target_symbols.len() > 32 {
+                session.last_target_symbols.pop_front();
+            }
+            session
+                .intent_symbol_cache
+                .insert(task.to_lowercase(), symbol.to_string());
+        }
     }
 
+    let confidence_score = result
+        .get("confidence_score")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.55);
     if reference_only && auto_minimal_raw {
-        if let Some(seed) = build_minimal_raw_seed(&result, &state) {
-            if let Some(obj) = result.as_object_mut() {
-                obj.insert("minimal_raw_seed".to_string(), seed);
+        if (0.50..0.75).contains(&confidence_score) {
+            if let Some(seed) = build_minimal_raw_seed(&result, &state) {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("minimal_raw_seed".to_string(), seed);
+                }
+            }
+        } else if confidence_score < 0.50 {
+            if let Some(raw) = build_low_confidence_raw_context(&result, &state, 2) {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("low_confidence_raw_context".to_string(), raw);
+                }
             }
         }
     }
@@ -312,6 +595,9 @@ async fn ide_autoroute(
         "selected_tool": selected_tool,
         "single_file_fast_path": single_file_fast_path,
         "reference_only": reference_only,
+        "mapping_mode": mapping_mode.unwrap_or_else(|| "footprint_first".to_string()),
+        "reuse_session_context": reuse_session_context,
+        "reused_context_count": reused_context_count,
         "result": result
     }))
 }
@@ -364,6 +650,47 @@ fn build_minimal_raw_seed(
         "end": clipped_end,
         "code_span": result.result
     }))
+}
+
+fn build_low_confidence_raw_context(
+    planned_result: &serde_json::Value,
+    state: &AppState,
+    max_items: usize,
+) -> Option<serde_json::Value> {
+    let ctx = planned_result.get("context")?.as_array()?;
+    let mut out = Vec::new();
+    for item in ctx.iter().take(max_items) {
+        let file = item.get("file")?.as_str()?.to_string();
+        let start = item.get("start")?.as_u64()? as u32;
+        let end = item.get("end")?.as_u64()? as u32;
+        let clipped_end = start.saturating_add(40).min(end);
+        let req = RetrievalRequest {
+            operation: Operation::GetCodeSpan,
+            name: None,
+            query: None,
+            file: Some(file.clone()),
+            start_line: Some(start),
+            end_line: Some(clipped_end),
+            max_tokens: None,
+            workspace_scope: None,
+            limit: None,
+            node_id: None,
+            radius: None,
+            logic_radius: None,
+            dependency_radius: None,
+            edit_description: None,
+            patch_mode: None,
+            run_tests: None,
+        };
+        let res = state.retrieval.lock().handle(req).ok()?;
+        out.push(serde_json::json!({
+            "file": file,
+            "start": start,
+            "end": clipped_end,
+            "code_span": res.result
+        }));
+    }
+    Some(serde_json::json!(out))
 }
 
 async fn get_performance_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -457,6 +784,13 @@ pre{background:#f4f4f4;padding:12px;overflow:auto;white-space:pre-wrap}
 <label><input type="checkbox" id="semantic_enabled" checked/> Semantic enabled</label><br/>
 <label><input type="checkbox" id="reference_only" checked/> Reference-only mode (default)</label><br/>
 <label><input type="checkbox" id="single_file_fast_path"/> Single-file fast path</label><br/>
+<label>Mapping mode</label>
+<select id="mapping_mode">
+  <option value="footprint_first">footprint_first (default)</option>
+  <option value="legacy_full">legacy_full</option>
+</select>
+<label>Max footprint items</label><input id="max_footprint_items" value="120"/>
+<label><input type="checkbox" id="reuse_session_context" checked/> Reuse session context</label><br/>
 <label><input type="checkbox" id="compressed"/> Input compressed</label><br/>
 <label>Original query (required when compressed semantic is used)</label><input id="original_query" placeholder="original user query"/>
 <button onclick="loadTools()">GET /llm_tools</button>
@@ -483,6 +817,9 @@ async function sendRetrieve(){
     semantic_enabled:document.getElementById('semantic_enabled').checked,
     reference_only:document.getElementById('reference_only').checked,
     single_file_fast_path:document.getElementById('single_file_fast_path').checked,
+    mapping_mode:document.getElementById('mapping_mode').value||'footprint_first',
+    max_footprint_items:Number(document.getElementById('max_footprint_items').value)||120,
+    reuse_session_context:document.getElementById('reuse_session_context').checked,
     input_compressed:document.getElementById('compressed').checked,
     original_query:document.getElementById('original_query').value||null,
     session_id:document.getElementById('session_id').value||null
@@ -511,10 +848,14 @@ async fn edit(
     Json(body): Json<EditRequestBody>,
 ) -> Json<serde_json::Value> {
     {
-        let middleware = state.semantic_middleware.lock();
+        let mut middleware = state.semantic_middleware.lock();
+        let now = now_epoch_s();
+        middleware
+            .sessions
+            .retain(|_, v| now.saturating_sub(v.last_seen_epoch_s) <= SESSION_TTL_SECS);
         if middleware.semantic_first_enabled {
             let session_id = body.session_id.as_deref().unwrap_or_default();
-            if session_id.is_empty() || !middleware.retrieved_sessions.contains(session_id) {
+            if session_id.is_empty() || !middleware.sessions.contains_key(session_id) {
                 return Json(serde_json::json!({
                     "ok": false,
                     "error": "semantic-first middleware blocked edit: call /retrieve first with a session_id, then retry /edit with the same session_id."
@@ -554,11 +895,15 @@ struct SemanticMiddlewareUpdate {
 }
 
 async fn get_semantic_middleware(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let middleware = state.semantic_middleware.lock();
+    let mut middleware = state.semantic_middleware.lock();
+    let now = now_epoch_s();
+    middleware
+        .sessions
+        .retain(|_, v| now.saturating_sub(v.last_seen_epoch_s) <= SESSION_TTL_SECS);
     Json(serde_json::json!({
         "ok": true,
         "semantic_first_enabled": middleware.semantic_first_enabled,
-        "tracked_sessions": middleware.retrieved_sessions.len()
+        "tracked_sessions": middleware.sessions.len()
     }))
 }
 
@@ -569,12 +914,12 @@ async fn update_semantic_middleware(
     let mut middleware = state.semantic_middleware.lock();
     middleware.semantic_first_enabled = body.semantic_first_enabled;
     if !body.semantic_first_enabled {
-        middleware.retrieved_sessions.clear();
+        middleware.sessions.clear();
     }
     Json(serde_json::json!({
         "ok": true,
         "semantic_first_enabled": middleware.semantic_first_enabled,
-        "tracked_sessions": middleware.retrieved_sessions.len()
+        "tracked_sessions": middleware.sessions.len()
     }))
 }
 
@@ -927,6 +1272,7 @@ struct ABTestDevRequest {
     max_context_tokens: Option<usize>,
     single_file_fast_path: Option<bool>,
     autoroute_first: Option<bool>,
+    scenario: Option<String>,
 }
 
 async fn run_ab_test_dev(
@@ -938,6 +1284,7 @@ async fn run_ab_test_dev(
     let max_context_tokens = body.max_context_tokens;
     let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
     let autoroute_first = body.autoroute_first.unwrap_or(true);
+    let scenario = body.scenario;
     let retrieval = state.retrieval.clone();
     let result = tokio::task::spawn_blocking(move || {
         retrieval
@@ -948,6 +1295,7 @@ async fn run_ab_test_dev(
                 max_context_tokens,
                 single_file_fast_path,
                 autoroute_first,
+                scenario.as_deref(),
             )
     })
     .await;

@@ -17,6 +17,8 @@ pub struct RetrievalService {
     repo_root: PathBuf,
     storage: storage::Storage,
     planned_context_cache: Mutex<HashMap<String, CachedContext>>,
+    symbol_neighborhood_cache: Mutex<HashMap<String, CachedContext>>,
+    prompt_fragment_cache: Mutex<HashMap<String, CachedPrompt>>,
     perf_stats: Mutex<PerfStats>,
 }
 
@@ -28,11 +30,24 @@ struct CachedContext {
     value: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedPrompt {
+    cached_at_epoch_s: u64,
+    source_revision: u64,
+    prompt: String,
+}
+
 #[derive(Debug, Default)]
 struct PerfStats {
     cache_hits: usize,
     cache_misses: usize,
     cache_evictions: usize,
+    symbol_cache_hits: usize,
+    symbol_cache_misses: usize,
+    symbol_cache_evictions: usize,
+    prompt_cache_hits: usize,
+    prompt_cache_misses: usize,
+    prompt_cache_evictions: usize,
     op: HashMap<String, OpPerf>,
 }
 
@@ -78,6 +93,22 @@ struct ContextTuning {
     escalation_hits_threshold: usize,
     guardrail_ratio: f32,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingMode {
+    FootprintFirst,
+    LegacyFull,
+}
+
+impl MappingMode {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.unwrap_or("footprint_first").trim().to_lowercase().as_str() {
+            "legacy_full" => Self::LegacyFull,
+            _ => Self::FootprintFirst,
+        }
+    }
+}
+
 impl RetrievalService {
     pub fn new(repo_root: PathBuf, storage: storage::Storage) -> Self {
         let cache = load_planned_context_cache(&repo_root);
@@ -85,12 +116,18 @@ impl RetrievalService {
             repo_root,
             storage,
             planned_context_cache: Mutex::new(cache),
+            symbol_neighborhood_cache: Mutex::new(HashMap::new()),
+            prompt_fragment_cache: Mutex::new(HashMap::new()),
             perf_stats: Mutex::new(PerfStats::default()),
         }
     }
 
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    pub fn index_revision(&self) -> u64 {
+        current_index_revision(&self.repo_root)
     }
 
     pub fn load_env(&self) {
@@ -130,6 +167,23 @@ impl RetrievalService {
         request: RetrievalRequest,
         single_file_fast_path: Option<bool>,
         include_raw_code_override: Option<bool>,
+    ) -> Result<RetrievalResponse> {
+        self.handle_with_options_ext(
+            request,
+            single_file_fast_path,
+            include_raw_code_override,
+            None,
+            None,
+        )
+    }
+
+    pub fn handle_with_options_ext(
+        &self,
+        request: RetrievalRequest,
+        single_file_fast_path: Option<bool>,
+        include_raw_code_override: Option<bool>,
+        mapping_mode: Option<&str>,
+        max_footprint_items: Option<usize>,
     ) -> Result<RetrievalResponse> {
         let op_name = format!("{:?}", request.operation).to_lowercase();
         let started = Instant::now();
@@ -217,6 +271,8 @@ impl RetrievalService {
                     single_file_fast_path.unwrap_or(false),
                     include_raw_code_override,
                     None,
+                    mapping_mode,
+                    max_footprint_items,
                 )?
             }
             Operation::GetRepoMapHierarchy => self.get_repo_map_hierarchy()?,
@@ -239,6 +295,8 @@ impl RetrievalService {
                     request.workspace_scope.unwrap_or_default(),
                     single_file_fast_path.unwrap_or(false),
                     include_raw_code_override,
+                    mapping_mode,
+                    max_footprint_items,
                 )?
             }
             Operation::PlanSafeEdit => {
@@ -257,6 +315,31 @@ impl RetrievalService {
                     request.run_tests.unwrap_or(false),
                 )?
             }
+            // These operations are intercepted by the API layer before reaching the retrieval
+            // service. They are listed here only to satisfy exhaustive pattern matching.
+            Operation::GetControlFlowHints => {
+                let symbol = request.name.or(request.query).unwrap_or_default();
+                self.get_control_flow_hints(&symbol)?
+            }
+            Operation::GetDataFlowHints => {
+                let symbol = request.name.or(request.query).unwrap_or_default();
+                self.get_data_flow_hints(&symbol)?
+            }
+            Operation::GetHybridRankedContext => {
+                let query = request.query.unwrap_or_default();
+                let max_tokens = request.max_tokens.unwrap_or(1400);
+                self.get_hybrid_ranked_context(
+                    &query,
+                    max_tokens,
+                    single_file_fast_path.unwrap_or(true),
+                )?
+            }
+            Operation::GetDebugGraph => self.get_debug_graph()?,
+            Operation::GetPipelineGraph => self.get_pipeline_graph()?,
+            Operation::GetRootCauseCandidates => self.get_root_cause_candidates()?,
+            Operation::GetTestGaps => self.get_test_gaps()?,
+            Operation::GetDeploymentHistory => self.get_deployment_history()?,
+            Operation::GetPerformanceStats => self.get_performance_stats(),
         };
         self.record_operation_perf(&op_name, started.elapsed().as_millis());
 
@@ -295,8 +378,24 @@ impl RetrievalService {
         let cache_hits = perf.cache_hits;
         let cache_misses = perf.cache_misses;
         let cache_evictions = perf.cache_evictions;
+        let symbol_cache_hits = perf.symbol_cache_hits;
+        let symbol_cache_misses = perf.symbol_cache_misses;
+        let symbol_cache_evictions = perf.symbol_cache_evictions;
+        let prompt_cache_hits = perf.prompt_cache_hits;
+        let prompt_cache_misses = perf.prompt_cache_misses;
+        let prompt_cache_evictions = perf.prompt_cache_evictions;
         drop(perf);
         let cache_entries = self.planned_context_cache.lock().expect("cache lock").len();
+        let symbol_cache_entries = self
+            .symbol_neighborhood_cache
+            .lock()
+            .expect("symbol cache lock")
+            .len();
+        let prompt_cache_entries = self
+            .prompt_fragment_cache
+            .lock()
+            .expect("prompt cache lock")
+            .len();
 
         json!({
             "targets": {
@@ -309,6 +408,18 @@ impl RetrievalService {
                 "hits": cache_hits,
                 "misses": cache_misses,
                 "evictions": cache_evictions,
+            },
+            "symbol_neighborhood_cache": {
+                "entries": symbol_cache_entries,
+                "hits": symbol_cache_hits,
+                "misses": symbol_cache_misses,
+                "evictions": symbol_cache_evictions,
+            },
+            "prompt_fragment_cache": {
+                "entries": prompt_cache_entries,
+                "hits": prompt_cache_hits,
+                "misses": prompt_cache_misses,
+                "evictions": prompt_cache_evictions,
             },
             "operations": op_stats
         })
@@ -634,10 +745,16 @@ impl RetrievalService {
         max_context_tokens: Option<usize>,
         single_file_fast_path: bool,
         autoroute_first: bool,
+        scenario: Option<&str>,
     ) -> Result<serde_json::Value> {
         load_env_from_file(&self.repo_root);
         ensure_todo_ab_project(&self.repo_root)?;
-        let tasks = build_todo_dev_suite();
+        let scenario_name = scenario.unwrap_or("core");
+        let tasks = if scenario_name.eq_ignore_ascii_case("extended") {
+            build_todo_dev_suite_extended()
+        } else {
+            build_todo_dev_suite()
+        };
         let requested_feature = feature_request.unwrap_or("todo app end-to-end suite");
         let max_tokens = max_context_tokens.unwrap_or(1800);
         let task_count = tasks.len();
@@ -699,6 +816,7 @@ impl RetrievalService {
         let mut semantic_prompt_over_control_count = 0usize;
         let mut escalation_attempts = 0usize;
         let mut escalation_guardrail_skips = 0usize;
+        let mut runtime_trim_applied = 0usize;
 
         for task in tasks {
             let semantic_exec = self
@@ -737,6 +855,8 @@ impl RetrievalService {
                         single_file_fast_path,
                         Some(false),
                         Some(task.target_symbol),
+                        Some("footprint_first"),
+                        Some(120),
                     )
                     .unwrap_or_else(|_| json!({ "context": [] }))
                 };
@@ -768,6 +888,15 @@ impl RetrievalService {
                 .get("symbol")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
+                .to_string();
+            let confidence_score = semantic_context
+                .get("confidence_score")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.55) as f32;
+            let confidence_band = semantic_context
+                .get("confidence_band")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| confidence_band(confidence_score))
                 .to_string();
             let target_match = planned_target_symbol.eq_ignore_ascii_case(task.target_symbol);
             if target_match {
@@ -828,12 +957,13 @@ impl RetrievalService {
             let seed_target_aligned =
                 !minimal_seed_file.is_empty() && minimal_seed_file == target_symbol_file;
             let mut with_prompt_light =
-                build_light_prompt_from_refs(&base_prompt, &delta_refs, delta_refs.len());
+                self.build_light_prompt_cached(&base_prompt, &delta_refs, delta_refs.len());
             if autoroute_first
                 && task.requires_code_change
                 && !minimal_raw_seed.is_empty()
                 && !delta_refs.is_empty()
                 && seed_target_aligned
+                && confidence_score < 0.75
             {
                 with_prompt_light = format!(
                     "Structured context refs (delta from previous step):\n{}\n\nMinimal raw seed (autoroute):\n{}\n\nTask:\n{}",
@@ -864,7 +994,16 @@ impl RetrievalService {
             {
                 refs_used -= 1;
                 with_prompt_light =
-                    build_light_prompt_from_refs(&base_prompt, &delta_refs, refs_used);
+                    self.build_light_prompt_cached(&base_prompt, &delta_refs, refs_used);
+            }
+            while refs_used > 1
+                && confidence_score < 0.75
+                && estimate_tokens(&with_prompt_light) > a_tokens.max(1)
+            {
+                refs_used -= 1;
+                with_prompt_light =
+                    self.build_light_prompt_cached(&base_prompt, &delta_refs, refs_used);
+                runtime_trim_applied += 1;
             }
             let with_prompt_heavy = if task.requires_code_change && !raw_code_context.is_empty() {
                 format!(
@@ -889,7 +1028,8 @@ impl RetrievalService {
             let prefer_heavy_first = task.requires_code_change
                 && refs_used == 0
                 && !with_prompt_heavy.is_empty()
-                && !heavy_prompt_over_guardrail;
+                && !heavy_prompt_over_guardrail
+                && confidence_score < 0.50;
             if prefer_heavy_first {
                 heavy_first_tasks += 1;
             }
@@ -919,6 +1059,8 @@ impl RetrievalService {
             let mut b_tokens_final = b_tokens;
             let mut b_output_final = b_output.clone();
             let mut with_prompt_final = with_prompt_initial.clone();
+            let planning_prompt_chars = with_prompt_light.len();
+            let editing_prompt_chars = with_prompt_heavy.len();
             let mut escalation_used = false;
             let mut guardrail_applied = false;
             let mut semantic_route = if prefer_heavy_first {
@@ -931,6 +1073,7 @@ impl RetrievalService {
                 && task.requires_code_change
                 && b_hits < tuning.escalation_hits_threshold
                 && !with_prompt_heavy.is_empty()
+                && confidence_score < 0.75
             {
                 escalation_attempts += 1;
                 escalation_used = true;
@@ -1012,6 +1155,8 @@ impl RetrievalService {
                 "target_symbol": task.target_symbol,
                 "planned_target_symbol": planned_target_symbol,
                 "target_match": target_match,
+                "confidence_score": confidence_score,
+                "confidence_band": confidence_band,
                 "autoroute_first": autoroute_first,
                 "tokens_without_semantic": a_tokens,
                 "tokens_with_semantic": b_tokens_final,
@@ -1026,6 +1171,9 @@ impl RetrievalService {
                 "control_attachment_chars": control_attachment_context.len(),
                 "semantic_prompt_chars": with_prompt_final.len(),
                 "control_prompt_chars": without_prompt.len(),
+                "planning_prompt_chars": planning_prompt_chars,
+                "editing_prompt_chars": editing_prompt_chars,
+                "reused_context_count": 0usize,
                 "success_without_semantic": success_without,
                 "success_with_semantic": success_with
             });
@@ -1060,11 +1208,16 @@ impl RetrievalService {
                 "semantic_route": semantic_route,
                 "planned_target_symbol": planned_target_symbol,
                 "target_match": target_match,
+                "confidence_score": confidence_score,
+                "confidence_band": confidence_band,
                 "seed_target_aligned": seed_target_aligned,
                 "light_ref_count_used": refs_used,
                 "control_attachment_chars": control_attachment_context.len(),
                 "semantic_prompt_chars": with_prompt_final.len(),
                 "control_prompt_chars": without_prompt.len(),
+                "planning_prompt_chars": planning_prompt_chars,
+                "editing_prompt_chars": editing_prompt_chars,
+                "reused_context_count": 0usize,
                 "control_attachment_files": task
                     .context_ranges
                     .iter()
@@ -1102,13 +1255,14 @@ impl RetrievalService {
         let escalation_attempt_pct = (escalation_attempts as f32 / task_count_f) * 100.0;
         let escalation_guardrail_skip_pct =
             (escalation_guardrail_skips as f32 / task_count_f) * 100.0;
+        let runtime_trim_applied_pct = (runtime_trim_applied as f32 / task_count_f) * 100.0;
 
         append_ab_test_csv(
             &self.repo_root,
             &ABTestRow {
                 timestamp: current_ts(),
                 provider: selected_provider.clone(),
-                symbol: "dev_suite_v2:todo_app_10_tasks".to_string(),
+                symbol: format!("dev_suite_v2:todo_app_{}_tasks", task_count),
                 tokens_without_project: total_without,
                 tokens_with_project: total_with,
                 savings_pct,
@@ -1117,6 +1271,7 @@ impl RetrievalService {
 
         Ok(json!({
             "scenario": "todo_app_end_to_end_v2",
+            "scenario_mode": scenario_name,
             "provider": selected_provider,
             "model": selected_model,
             "feature_request": requested_feature,
@@ -1157,6 +1312,8 @@ impl RetrievalService {
                 "escalation_attempt_pct": escalation_attempt_pct,
                 "escalation_guardrail_skips": escalation_guardrail_skips,
                 "escalation_guardrail_skip_pct": escalation_guardrail_skip_pct,
+                "runtime_trim_applied": runtime_trim_applied,
+                "runtime_trim_applied_pct": runtime_trim_applied_pct,
             },
             "task_results": task_results,
         }))
@@ -1173,6 +1330,9 @@ impl RetrievalService {
                 "structured_refs_default": true,
                 "reference_only_default": true,
                 "minimal_raw_seed_via_autoroute": true,
+                "mapping_mode_default": "footprint_first",
+                "max_footprint_items_default": 120,
+                "reuse_session_context_default": true,
                 "adaptive_breadth": true,
                 "single_file_fast_path": "supported in /ab_test_dev and /ide_autoroute (default=true)"
             },
@@ -1184,7 +1344,7 @@ impl RetrievalService {
                 {"name":"get_logic_nodes","operation":"GetLogicNodes","purpose":"Inspect logic structure for a symbol.","required":["name"]},
                 {"name":"get_dependency_neighborhood","operation":"GetDependencyNeighborhood","purpose":"Traverse caller/callee neighborhoods.","required":["name","radius"]},
                 {"name":"get_reasoning_context","operation":"GetReasoningContext","purpose":"Fetch semantic context for planning edits.","required":["name","logic_radius","dependency_radius"]},
-                {"name":"get_planned_context","operation":"GetPlannedContext","purpose":"Build context by intent and budget.","required":["query","max_tokens"]},
+                {"name":"get_planned_context","operation":"GetPlannedContext","purpose":"Build context by intent and budget.","required":["query","max_tokens"],"optional":["mapping_mode","max_footprint_items","reuse_session_context"]},
                 {"name":"plan_safe_edit","operation":"PlanSafeEdit","purpose":"Generate impact-aware patch preview and policy-checked edit plan.","required":["name_or_query","edit_description"]},
                 {"name":"ide_autoroute","endpoint":"/ide_autoroute","purpose":"IDE-native semantic-first entrypoint that auto-selects first retrieval call.","required":["task"]},
                 {"name":"performance_stats","endpoint":"/performance_stats","purpose":"Runtime hardening metrics (cache hit rate, op latency, p95)."},
@@ -1385,6 +1545,16 @@ impl RetrievalService {
         symbol_name: &str,
         radius: usize,
     ) -> Result<serde_json::Value> {
+        let key = format!("symbol_neighborhood::{symbol_name}::{radius}");
+        if let Some(cached) = self.try_get_symbol_cache(&key, 1800) {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.symbol_cache_hits += 1;
+            return Ok(cached);
+        }
+        {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.symbol_cache_misses += 1;
+        }
         let symbol = self
             .storage
             .get_symbol_any(symbol_name)?
@@ -1398,12 +1568,14 @@ impl RetrievalService {
         dependencies.retain(|s| s.id != Some(symbol_id));
         sort_symbols(&mut dependencies);
 
-        Ok(json!({
+        let output = json!({
             "symbol": symbol,
             "logic_nodes": logic_nodes,
             "dependency_neighbors": dependencies,
             "order": ["symbol", "logic_nodes", "dependency_neighbors"],
-        }))
+        });
+        self.store_symbol_cache(key, output.clone(), 512);
+        Ok(output)
     }
 
     fn get_reasoning_context(
@@ -1524,11 +1696,15 @@ impl RetrievalService {
         single_file_fast_path: bool,
         include_raw_code_override: Option<bool>,
         preferred_symbol: Option<&str>,
+        mapping_mode: Option<&str>,
+        max_footprint_items: Option<usize>,
     ) -> Result<serde_json::Value> {
         let include_raw_code = include_raw_code_override.unwrap_or(false);
         let preferred_symbol_key = preferred_symbol.unwrap_or("");
+        let mapping_mode_key = mapping_mode.unwrap_or("footprint_first");
+        let footprint_limit = max_footprint_items.unwrap_or(120);
         let cache_key = format!(
-            "planned::{query}::{max_tokens}::{single_file_fast_path}::{include_raw_code}::{preferred_symbol_key}"
+            "planned::{query}::{max_tokens}::{single_file_fast_path}::{include_raw_code}::{preferred_symbol_key}::{mapping_mode_key}::{footprint_limit}"
         );
         if let Some(cached) = self.try_get_cached_context(&cache_key, 3600) {
             let mut perf = self.perf_stats.lock().expect("perf lock");
@@ -1544,6 +1720,18 @@ impl RetrievalService {
         let mut symbol_names: Vec<String> = symbols.into_iter().map(|s| s.name).collect();
         symbol_names.sort();
         symbol_names.dedup();
+        let mode = MappingMode::parse(mapping_mode);
+        let mut candidate_files: Vec<String> = Vec::new();
+        let mut candidate_symbols: Vec<String> = Vec::new();
+        if mode == MappingMode::FootprintFirst {
+            let footprint = self.build_project_footprint(footprint_limit)?;
+            let (files, symbols) = build_task_candidate_set(query, &footprint, 18, 64);
+            candidate_files = files;
+            candidate_symbols = symbols;
+            if !candidate_symbols.is_empty() {
+                symbol_names = candidate_symbols.clone();
+            }
+        }
 
         let module_records = self.storage.list_modules()?;
         let mut file_to_module = std::collections::HashMap::new();
@@ -1587,6 +1775,13 @@ impl RetrievalService {
                 plan.dependency_radius,
                 max_tokens,
             )?;
+        let confidence_score = self.estimate_context_confidence(
+            query,
+            &plan.target_symbol,
+            &candidate_symbols,
+            preferred_symbol,
+        );
+        let confidence_band = confidence_band(confidence_score);
 
         if single_file_fast_path {
             let target_code = if include_raw_code {
@@ -1609,6 +1804,12 @@ impl RetrievalService {
                 "small_repo_mode": self.storage.list_files()?.len() < 50,
                 "single_file_fast_path": true,
                 "retrieval_strategy": "single_file_fast_path",
+                "mapping_mode": mapping_mode_key,
+                "context_phase": if mode == MappingMode::FootprintFirst { "footprint_stage_a_targeted_stage_b_conditional_stage_c" } else { "legacy_full" },
+                "candidate_files": candidate_files,
+                "candidate_symbols": candidate_symbols,
+                "confidence_score": confidence_score,
+                "confidence_band": confidence_band,
                 "include_raw_code": include_raw_code,
                 "context": [{
                     "file": target_symbol.file,
@@ -1810,6 +2011,12 @@ impl RetrievalService {
             "intent": format!("{intent:?}").to_lowercase(),
             "plan": plan,
             "effective_breadth": breadth,
+            "mapping_mode": mapping_mode_key,
+            "context_phase": if mode == MappingMode::FootprintFirst { "footprint_stage_a_targeted_stage_b_conditional_stage_c" } else { "legacy_full" },
+            "candidate_files": candidate_files,
+            "candidate_symbols": candidate_symbols,
+            "confidence_score": confidence_score,
+            "confidence_band": confidence_band,
             "small_repo_mode": file_count < 50,
             "retrieval_strategy": "two_stage_rank_then_span_fetch",
             "include_raw_code": include_raw_code,
@@ -1820,6 +2027,94 @@ impl RetrievalService {
         Ok(output)
     }
 
+    fn build_project_footprint(&self, max_items: usize) -> Result<Vec<serde_json::Value>> {
+        let modules = self.storage.list_modules()?;
+        let mut file_to_module: HashMap<String, String> = HashMap::new();
+        for module in modules {
+            let module_id = module.id.unwrap_or_default();
+            for mf in self.storage.list_module_files(module_id)? {
+                file_to_module.insert(mf.file_path, module.name.clone());
+            }
+        }
+        let files = self.storage.list_files()?;
+        let symbols = self.storage.list_symbols()?;
+        let mut symbols_by_file: HashMap<String, Vec<String>> = HashMap::new();
+        for sym in symbols {
+            symbols_by_file
+                .entry(sym.file)
+                .or_default()
+                .push(sym.name.clone());
+        }
+        let mut footprint = Vec::new();
+        for file in files.into_iter().take(max_items) {
+            let top_symbols = symbols_by_file
+                .get(&file)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(8)
+                .collect::<Vec<_>>();
+            let objective = infer_file_objective(&file, &top_symbols);
+            footprint.push(json!({
+                "file": file,
+                "module": file_to_module.get(&file).cloned().unwrap_or_else(|| "unknown".to_string()),
+                "objective": objective,
+                "top_symbols": top_symbols
+            }));
+        }
+        Ok(footprint)
+    }
+
+    fn estimate_context_confidence(
+        &self,
+        query: &str,
+        target_symbol: &str,
+        candidate_symbols: &[String],
+        preferred_symbol: Option<&str>,
+    ) -> f32 {
+        let q_norm = normalize_query_tokens(query);
+        let target_norm = normalize_query_tokens(target_symbol);
+        let mut score = 0.0f32;
+        if !target_norm.is_empty() && q_norm.contains(&target_norm) {
+            score += 0.35;
+        }
+        if let Ok(lexical) = self.storage.search_symbol_by_name(query, 8) {
+            if lexical
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(target_symbol))
+            {
+                score += 0.2;
+            }
+        }
+        if candidate_symbols
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(target_symbol))
+        {
+            score += 0.2;
+        }
+        if let Ok(symbol) = self.storage.get_symbol_any(target_symbol) {
+            if let Some(sym) = symbol {
+                if let Some(id) = sym.id {
+                    if self
+                        .storage
+                        .get_dependency_neighbors(id, 1)
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false)
+                    {
+                        score += 0.15;
+                    }
+                }
+            }
+        }
+        if preferred_symbol
+            .map(|p| p.eq_ignore_ascii_case(target_symbol))
+            .unwrap_or(false)
+        {
+            score += 0.1;
+        }
+        score.clamp(0.0, 1.0)
+    }
+
     fn get_workspace_reasoning_context(
         &self,
         query: &str,
@@ -1827,6 +2122,8 @@ impl RetrievalService {
         workspace_scope: Vec<String>,
         single_file_fast_path: bool,
         include_raw_code_override: Option<bool>,
+        mapping_mode: Option<&str>,
+        max_footprint_items: Option<usize>,
     ) -> Result<serde_json::Value> {
         let mut repositories = self.storage.list_repositories()?;
         if !workspace_scope.is_empty() {
@@ -1838,6 +2135,8 @@ impl RetrievalService {
             single_file_fast_path,
             include_raw_code_override,
             None,
+            mapping_mode,
+            max_footprint_items,
         )?;
         Ok(json!({
             "workspace_repositories": repositories,
@@ -1859,6 +2158,8 @@ impl RetrievalService {
             single_file_fast_path,
             Some(false),
             preferred_symbol,
+            Some("footprint_first"),
+            Some(120),
         )?;
         let seed_ctx = preferred_symbol
             .and_then(|s| self.storage.get_symbol_any(s).ok().flatten())
@@ -2022,7 +2323,15 @@ impl RetrievalService {
         single_file_fast_path: bool,
     ) -> Result<serde_json::Value> {
         let planned =
-            self.get_planned_context(query, max_tokens, single_file_fast_path, Some(false), None)?;
+            self.get_planned_context(
+                query,
+                max_tokens,
+                single_file_fast_path,
+                Some(false),
+                None,
+                Some("footprint_first"),
+                Some(120),
+            )?;
         let symbol = planned
             .get("symbol")
             .and_then(|v| v.as_str())
@@ -2140,6 +2449,149 @@ impl RetrievalService {
         if evicted {
             let mut perf = self.perf_stats.lock().expect("perf lock");
             perf.cache_evictions += 1;
+        }
+    }
+
+    fn try_get_symbol_cache(&self, key: &str, ttl_seconds: u64) -> Option<serde_json::Value> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let current_revision = current_index_revision(&self.repo_root);
+        let mut cache = self
+            .symbol_neighborhood_cache
+            .lock()
+            .expect("symbol cache lock");
+        let Some(entry) = cache.get_mut(key) else {
+            return None;
+        };
+        if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds
+            || entry.source_revision != current_revision
+        {
+            cache.remove(key);
+            drop(cache);
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.symbol_cache_evictions += 1;
+            return None;
+        }
+        Some(entry.value.clone())
+    }
+
+    fn store_symbol_cache(&self, key: String, value: serde_json::Value, max_entries: usize) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let source_revision = current_index_revision(&self.repo_root);
+        let mut cache = self
+            .symbol_neighborhood_cache
+            .lock()
+            .expect("symbol cache lock");
+        let mut evicted = false;
+        if cache.len() >= max_entries {
+            if let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.cached_at_epoch_s)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest_key);
+                evicted = true;
+            }
+        }
+        cache.insert(
+            key,
+            CachedContext {
+                cached_at_epoch_s: now,
+                source_revision,
+                value,
+            },
+        );
+        drop(cache);
+        if evicted {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.symbol_cache_evictions += 1;
+        }
+    }
+
+    fn build_light_prompt_cached(
+        &self,
+        base_prompt: &str,
+        refs: &[serde_json::Value],
+        count: usize,
+    ) -> String {
+        let refs_key = serde_json::to_string(&refs.iter().take(count).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let key = format!("v1::{count}::{refs_key}::{base_prompt}");
+        if let Some(prompt) = self.try_get_prompt_fragment(&key, 1800) {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.prompt_cache_hits += 1;
+            return prompt;
+        }
+        {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.prompt_cache_misses += 1;
+        }
+        let prompt = build_light_prompt_from_refs(base_prompt, refs, count);
+        self.store_prompt_fragment(key, prompt.clone(), 512);
+        prompt
+    }
+
+    fn try_get_prompt_fragment(&self, key: &str, ttl_seconds: u64) -> Option<String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let current_revision = current_index_revision(&self.repo_root);
+        let mut cache = self
+            .prompt_fragment_cache
+            .lock()
+            .expect("prompt cache lock");
+        let Some(entry) = cache.get_mut(key) else {
+            return None;
+        };
+        if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds
+            || entry.source_revision != current_revision
+        {
+            cache.remove(key);
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.prompt_cache_evictions += 1;
+            return None;
+        }
+        Some(entry.prompt.clone())
+    }
+
+    fn store_prompt_fragment(&self, key: String, prompt: String, max_entries: usize) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let source_revision = current_index_revision(&self.repo_root);
+        let mut cache = self
+            .prompt_fragment_cache
+            .lock()
+            .expect("prompt cache lock");
+        let mut evicted = false;
+        if cache.len() >= max_entries {
+            if let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.cached_at_epoch_s)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest_key);
+                evicted = true;
+            }
+        }
+        cache.insert(
+            key,
+            CachedPrompt {
+                cached_at_epoch_s: now,
+                source_revision,
+                prompt,
+            },
+        );
+        if evicted {
+            let mut perf = self.perf_stats.lock().expect("perf lock");
+            perf.prompt_cache_evictions += 1;
         }
     }
 
@@ -2965,6 +3417,132 @@ fn build_structured_context_refs(
         .unwrap_or_default()
 }
 
+fn normalize_query_tokens(input: &str) -> String {
+    let mut out = String::new();
+    let mut prev_space = true;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_space = false;
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn infer_file_objective(path: &str, top_symbols: &[String]) -> String {
+    let p = path.to_lowercase();
+    if p.contains("test") || p.contains("spec") {
+        return "tests".to_string();
+    }
+    if p.contains("api") || p.contains("server") || p.contains("route") {
+        return "api_surface".to_string();
+    }
+    if p.contains("store") || p.contains("repo") || p.contains("db") {
+        return "data_layer".to_string();
+    }
+    if p.contains("ui") || p.contains("component") || p.contains("view") {
+        return "ui_layer".to_string();
+    }
+    if top_symbols
+        .iter()
+        .any(|s| s.to_lowercase().contains("render") || s.to_lowercase().contains("component"))
+    {
+        return "ui_layer".to_string();
+    }
+    "application_logic".to_string()
+}
+
+fn build_task_candidate_set(
+    query: &str,
+    footprint: &[serde_json::Value],
+    max_files: usize,
+    max_symbols: usize,
+) -> (Vec<String>, Vec<String>) {
+    let query_norm = normalize_query_tokens(query);
+    let tokens = query_norm
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .collect::<Vec<_>>();
+    let mut scored: Vec<(i64, String, Vec<String>)> = Vec::new();
+    for item in footprint {
+        let file = item
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let objective = item
+            .get("objective")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let symbols = item
+            .get("top_symbols")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if file.is_empty() {
+            continue;
+        }
+        let mut score = 0i64;
+        for token in &tokens {
+            if file.to_lowercase().contains(token) {
+                score += 8;
+            }
+            if objective.to_lowercase().contains(token) {
+                score += 6;
+            }
+            if symbols
+                .iter()
+                .any(|s| normalize_query_tokens(s).contains(token))
+            {
+                score += 10;
+            }
+        }
+        if score > 0 {
+            scored.push((score, file, symbols));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut files = Vec::new();
+    let mut symbols = Vec::new();
+    let mut seen_files = HashSet::new();
+    let mut seen_symbols = HashSet::new();
+    for (_, file, syms) in scored {
+        if files.len() >= max_files {
+            break;
+        }
+        if seen_files.insert(file.clone()) {
+            files.push(file);
+        }
+        for sym in syms {
+            if symbols.len() >= max_symbols {
+                break;
+            }
+            if seen_symbols.insert(sym.to_lowercase()) {
+                symbols.push(sym);
+            }
+        }
+    }
+    (files, symbols)
+}
+
+fn confidence_band(score: f32) -> &'static str {
+    if score >= 0.75 {
+        "high"
+    } else if score >= 0.50 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
 fn context_tuning_for_task(
     task: &ABDevTask,
     impacted_file_count: usize,
@@ -3261,6 +3839,70 @@ fn build_todo_dev_suite() -> Vec<ABDevTask> {
             expected_terms: vec!["menu", "tools", "app.tsx", "tag", "due date"],
         },
     ]
+}
+
+fn build_todo_dev_suite_extended() -> Vec<ABDevTask> {
+    let mut tasks = build_todo_dev_suite();
+    tasks.extend([
+        ABDevTask {
+            id: "X12",
+            title: "Cross-file workflow: add and render due-date badge",
+            feature_request: "Update store, service, and UI rendering path to support due-date badge visibility and sorting interactions.",
+            semantic_query: "todo app cross file due date badge ui service store",
+            target_symbol: "renderAppHome",
+            requires_code_change: true,
+            semantic_features: vec!["GetPlannedContext", "GetReasoningContext", "PlanSafeEdit"],
+            context_ranges: vec![
+                ContextRange { file: "todo_app/src/taskStore.ts", start: 25, end: 76 },
+                ContextRange { file: "todo_app/src/taskService.ts", start: 1, end: 57 },
+                ContextRange { file: "todo_app/src/app.tsx", start: 1, end: 11 },
+            ],
+            expected_terms: vec!["due date", "renderAppHome", "taskStore.ts", "taskService.ts"],
+        },
+        ABDevTask {
+            id: "R13",
+            title: "Repeated workflow: optimize follow-up edit path",
+            feature_request: "After implementing tag normalization, apply a follow-up refinement to tag filtering without reloading unrelated context.",
+            semantic_query: "todo app repeated workflow tag normalization follow up filter refinement",
+            target_symbol: "filterByTag",
+            requires_code_change: true,
+            semantic_features: vec!["GetPlannedContext", "GetDependencyNeighborhood", "PlanSafeEdit"],
+            context_ranges: vec![
+                ContextRange { file: "todo_app/src/taskStore.ts", start: 54, end: 76 },
+            ],
+            expected_terms: vec!["filterByTag", "tags", "normalization", "reuse"],
+        },
+        ABDevTask {
+            id: "M14",
+            title: "Medium footprint planning scenario",
+            feature_request: "Produce an implementation plan that touches multiple modules with bounded context expansion for due-date, priority, and tags.",
+            semantic_query: "todo app medium scenario multi module planning bounded context",
+            target_symbol: "addTask",
+            requires_code_change: false,
+            semantic_features: vec!["GetPlannedContext", "GetWorkspaceReasoningContext", "PlanSafeEdit"],
+            context_ranges: vec![
+                ContextRange { file: "todo_app/src/taskService.ts", start: 1, end: 57 },
+                ContextRange { file: "todo_app/src/taskStore.ts", start: 1, end: 76 },
+                ContextRange { file: "todo_app/src/menu.tsx", start: 1, end: 23 },
+            ],
+            expected_terms: vec!["plan", "priority", "due date", "tags"],
+        },
+        ABDevTask {
+            id: "L15",
+            title: "Large footprint planning scenario",
+            feature_request: "Generate a rollout checklist for scaling semantic retrieval behavior across a larger codebase while preserving edit precision.",
+            semantic_query: "semantic retrieval large project rollout checklist precision token savings",
+            target_symbol: "TaskMenu",
+            requires_code_change: false,
+            semantic_features: vec!["GetPlannedContext", "GetRepoMapHierarchy", "PlanSafeEdit"],
+            context_ranges: vec![
+                ContextRange { file: "todo_app/src/menu.tsx", start: 1, end: 23 },
+                ContextRange { file: "todo_app/src/app.tsx", start: 1, end: 11 },
+            ],
+            expected_terms: vec!["rollout", "retrieval", "precision", "token"],
+        },
+    ]);
+    tasks
 }
 
 const TODO_TYPES_TS: &str = r#"export type TaskPriority = "HIGH" | "MEDIUM" | "LOW";

@@ -281,6 +281,16 @@ pub enum Operation {
     SearchSemanticSymbol,
     GetWorkspaceReasoningContext,
     PlanSafeEdit,
+    // Unified retrieve operations (previously separate endpoints)
+    GetControlFlowHints,
+    GetDataFlowHints,
+    GetHybridRankedContext,
+    GetDebugGraph,
+    GetPipelineGraph,
+    GetRootCauseCandidates,
+    GetTestGaps,
+    GetDeploymentHistory,
+    GetPerformanceStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
