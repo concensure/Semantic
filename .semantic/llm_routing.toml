@@ -1,9 +1,9 @@
 # preferred: ordered list of provider keys from llm_config.toml
 [planning]
-preferred = ["anthropic", "openai"]
+preferred = ["primary", "secondary"]
 
 [execution]
-preferred = ["openai", "ollama", "together"]
+preferred = ["primary", "local", "secondary"]
 
 [interactive] # ask mode (no code changes)
-preferred = ["openrouter", "openai"]
+preferred = ["secondary", "primary"]

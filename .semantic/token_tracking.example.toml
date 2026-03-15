@@ -1,0 +1,6 @@
+# Optional token tracking companion.
+# Copy to `.semantic/token_tracking.toml` and set `enabled = true` to emit telemetry.
+
+enabled = false
+redaction_level = "strict"
+log_path = ".semantic/token_tracking/events.ndjson"

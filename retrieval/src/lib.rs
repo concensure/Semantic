@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use telemetry::{emit_current, metadata_pairs, task_summary_metadata, TelemetrySink};
 
 pub struct RetrievalService {
     repo_root: PathBuf,
@@ -19,6 +20,7 @@ pub struct RetrievalService {
     symbol_neighborhood_cache: Mutex<HashMap<String, CachedContext>>,
     prompt_fragment_cache: Mutex<HashMap<String, CachedPrompt>>,
     perf_stats: Mutex<PerfStats>,
+    telemetry: TelemetrySink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +165,7 @@ impl MappingMode {
 impl RetrievalService {
     pub fn new(repo_root: PathBuf, storage: storage::Storage) -> Self {
         let service = Self {
+            telemetry: TelemetrySink::from_repo_root(&repo_root),
             repo_root,
             storage,
             symbol_neighborhood_cache: Mutex::new(HashMap::new()),
@@ -183,6 +186,10 @@ impl RetrievalService {
 
     pub fn load_env(&self) {
         load_env_from_file(&self.repo_root);
+    }
+
+    pub fn telemetry(&self) -> TelemetrySink {
+        self.telemetry.clone()
     }
 
     fn migrate_legacy_planned_context_cache(&self) {
@@ -264,7 +271,28 @@ impl RetrievalService {
         let op_name = format!("{:?}", request.operation).to_lowercase();
         let started = Instant::now();
         let operation = request.operation.clone();
-        let result = match operation {
+        let start_metadata = task_summary_metadata(
+            &op_name,
+            true,
+            [
+                ("max_tokens", json!(request.max_tokens)),
+                ("single_file_fast_path", json!(single_file_fast_path)),
+                ("mapping_mode", json!(mapping_mode)),
+                ("max_footprint_items", json!(max_footprint_items)),
+            ],
+        );
+        emit_current(|sink, scope| {
+            let mut event = sink.event(
+                Some(scope),
+                "route_operation_started",
+                "retrieval",
+                Some(operation_category(&operation)),
+            );
+            event.metadata = sink.sanitize_metadata(start_metadata);
+            event.status = Some("started".to_string());
+            event
+        });
+        let result: Result<serde_json::Value> = (|| -> Result<serde_json::Value> { Ok(match operation {
             Operation::GetRepoMap => self.get_repo_map()?,
             Operation::GetFileOutline => {
                 let file = request.file.ok_or_else(|| anyhow!("file is required"))?;
@@ -438,10 +466,53 @@ impl RetrievalService {
             Operation::GetTestGaps => self.get_test_gaps()?,
             Operation::GetDeploymentHistory => self.get_deployment_history()?,
             Operation::GetPerformanceStats => self.get_performance_stats(),
-        };
-        self.record_operation_perf(&op_name, started.elapsed().as_millis());
+        }) })();
+        let elapsed_ms = started.elapsed().as_millis();
+        self.record_operation_perf(&op_name, elapsed_ms);
 
-        Ok(RetrievalResponse { operation, result })
+        match result {
+            Ok(result) => {
+                let completion_metadata = task_summary_metadata(
+                    &op_name,
+                    true,
+                    summarize_result(&result),
+                );
+                emit_current(|sink, scope| {
+                    let mut event = sink.event(
+                        Some(scope),
+                        "route_operation_completed",
+                        "retrieval",
+                        Some(operation_category(&operation)),
+                    );
+                    event.metadata = sink.sanitize_metadata(completion_metadata);
+                    event.status = Some("ok".to_string());
+                    event.latency_ms = Some(elapsed_ms);
+                    event
+                });
+                Ok(RetrievalResponse { operation, result })
+            }
+            Err(err) => {
+                let error_message = err.to_string();
+                emit_current(|sink, scope| {
+                    let mut event = sink.event(
+                        Some(scope),
+                        "route_operation_failed",
+                        "retrieval",
+                        Some(operation_category(&operation)),
+                    );
+                    event.metadata = sink.sanitize_metadata(task_summary_metadata(
+                        &op_name,
+                        false,
+                        [("error", json!(error_message.clone()))],
+                    ));
+                    event.status = Some("error".to_string());
+                    event.error_code = Some(error_message.clone());
+                    event.latency_ms = Some(elapsed_ms);
+                    event
+                });
+                Err(err)
+            }
+        }
     }
 
     pub fn get_performance_stats(&self) -> serde_json::Value {
@@ -3109,6 +3180,8 @@ struct ProviderSetting {
 #[derive(Debug, Clone)]
 struct LLMCallResult {
     model: String,
+    prompt_tokens_reported: Option<usize>,
+    completion_tokens_reported: Option<usize>,
     total_tokens: usize,
     text: String,
 }
@@ -3276,28 +3349,81 @@ fn call_live_llm_with_diagnostics(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| default_endpoint_for_provider(provider).to_string());
+    let started = Instant::now();
+    let prompt_estimated = telemetry::estimate_tokens(prompt);
+    emit_current(|sink, scope| {
+        let mut event = sink.event(Some(scope), "llm_request", "retrieval", Some("code_generation"));
+        event.provider = Some(provider.to_string());
+        event.model = Some(setting.model.clone());
+        event.status = Some("started".to_string());
+        event.prompt_tokens_estimated = Some(prompt_estimated);
+        event.metadata = sink.sanitize_metadata(metadata_pairs([
+            ("max_tokens", json!(max_tokens)),
+            ("provider", json!(provider)),
+            ("model", json!(setting.model.clone())),
+            ("endpoint", json!(endpoint.clone())),
+            ("prompt", json!(prompt)),
+        ]));
+        event
+    });
+    let result = if provider == "ollama" {
+        call_ollama(&endpoint, &setting.model, prompt)
+    } else {
+        let api_key_env = setting
+            .api_key_env
+            .clone()
+            .ok_or_else(|| format!("provider '{provider}' missing api_key_env setting"))?;
+        let api_key =
+            std::env::var(&api_key_env).map_err(|_| format!("missing env var: {api_key_env}"))?;
+        if api_key.trim().is_empty() {
+            return Err(format!("empty env var: {api_key_env}"));
+        }
 
-    if provider == "ollama" {
-        return call_ollama(&endpoint, &setting.model, prompt);
+        if provider == "anthropic" {
+            call_anthropic(&endpoint, &api_key, &setting.model, prompt, max_tokens)
+        } else if provider == "gemini" {
+            call_gemini(&endpoint, &api_key, &setting.model, prompt, max_tokens)
+        } else {
+            call_openai_family(&endpoint, &api_key, &setting.model, prompt, max_tokens)
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    match &result {
+        Ok(value) => emit_current(|sink, scope| {
+            let mut event = sink.event(Some(scope), "llm_response", "retrieval", Some("code_generation"));
+            event.provider = Some(provider.to_string());
+            event.model = Some(value.model.clone());
+            event.status = Some("ok".to_string());
+            event.latency_ms = Some(elapsed_ms);
+            event.prompt_tokens_reported = value.prompt_tokens_reported;
+            event.completion_tokens_reported = value.completion_tokens_reported;
+            event.total_tokens_reported = Some(value.total_tokens);
+            event.prompt_tokens_estimated = Some(prompt_estimated);
+            event.completion_tokens_estimated = Some(telemetry::estimate_tokens(&value.text));
+            event.metadata = sink.sanitize_metadata(metadata_pairs([
+                ("provider", json!(provider)),
+                ("model", json!(value.model.clone())),
+                ("response_preview", json!(value.text.clone())),
+            ]));
+            event
+        }),
+        Err(error) => emit_current(|sink, scope| {
+            let mut event = sink.event(Some(scope), "llm_response", "retrieval", Some("wasted_calls"));
+            event.provider = Some(provider.to_string());
+            event.model = Some(setting.model.clone());
+            event.status = Some("error".to_string());
+            event.error_code = Some(error.clone());
+            event.latency_ms = Some(elapsed_ms);
+            event.prompt_tokens_estimated = Some(prompt_estimated);
+            event.metadata = sink.sanitize_metadata(metadata_pairs([
+                ("provider", json!(provider)),
+                ("model", json!(setting.model.clone())),
+                ("error", json!(error.clone())),
+            ]));
+            event
+        }),
     }
-
-    let api_key_env = setting
-        .api_key_env
-        .clone()
-        .ok_or_else(|| format!("provider '{provider}' missing api_key_env setting"))?;
-    let api_key =
-        std::env::var(&api_key_env).map_err(|_| format!("missing env var: {api_key_env}"))?;
-    if api_key.trim().is_empty() {
-        return Err(format!("empty env var: {api_key_env}"));
-    }
-
-    if provider == "anthropic" {
-        return call_anthropic(&endpoint, &api_key, &setting.model, prompt, max_tokens);
-    }
-    if provider == "gemini" {
-        return call_gemini(&endpoint, &api_key, &setting.model, prompt, max_tokens);
-    }
-    call_openai_family(&endpoint, &api_key, &setting.model, prompt, max_tokens)
+    result
 }
 
 fn call_openai_family(
@@ -3343,6 +3469,16 @@ fn call_openai_family(
         .unwrap_or_else(|| estimate_tokens(&(prompt.to_string() + &text)));
     Ok(LLMCallResult {
         model: model.to_string(),
+        prompt_tokens_reported: value
+            .get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        completion_tokens_reported: value
+            .get("usage")
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
         total_tokens: tokens,
         text,
     })
@@ -3391,6 +3527,12 @@ fn call_anthropic(
         .unwrap_or_else(|| estimate_tokens(&(prompt.to_string() + &text)));
     Ok(LLMCallResult {
         model: model.to_string(),
+        prompt_tokens_reported: value
+            .get("usage")
+            .and_then(|u| u.get("input_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        completion_tokens_reported: None,
         total_tokens: tokens,
         text,
     })
@@ -3444,6 +3586,16 @@ fn call_gemini(
         .unwrap_or_else(|| estimate_tokens(&(prompt.to_string() + &text)));
     Ok(LLMCallResult {
         model: model.to_string(),
+        prompt_tokens_reported: value
+            .get("usageMetadata")
+            .and_then(|u| u.get("promptTokenCount"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        completion_tokens_reported: value
+            .get("usageMetadata")
+            .and_then(|u| u.get("candidatesTokenCount"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
         total_tokens: tokens,
         text,
     })
@@ -3479,6 +3631,8 @@ fn call_ollama(
         .to_string();
     Ok(LLMCallResult {
         model: model.to_string(),
+        prompt_tokens_reported: None,
+        completion_tokens_reported: None,
         total_tokens: estimate_tokens(&(prompt.to_string() + &text)),
         text,
     })
@@ -3519,6 +3673,44 @@ fn default_key_env_for_provider(provider: &str) -> Option<&'static str> {
 
 fn estimate_tokens(text: &str) -> usize {
     ((text.len() as f32) / 4.0).ceil() as usize
+}
+
+fn operation_category(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::GetPlannedContext => "planning",
+        Operation::GetWorkspaceReasoningContext
+        | Operation::GetHybridRankedContext
+        | Operation::SearchSemanticSymbol
+        | Operation::SearchSymbol
+        | Operation::GetReasoningContext
+        | Operation::GetDependencyNeighborhood
+        | Operation::GetSymbolNeighborhood => "retrieval",
+        Operation::PlanSafeEdit => "code_generation",
+        Operation::GetPerformanceStats => "observability",
+        _ => "context_assembly",
+    }
+}
+
+fn summarize_result(result: &serde_json::Value) -> Vec<(&'static str, serde_json::Value)> {
+    let context_count = result
+        .get("context")
+        .and_then(|v| v.as_array())
+        .map(|items| items.len());
+    let ref_count = result
+        .get("references")
+        .and_then(|v| v.as_array())
+        .map(|items| items.len());
+    let symbol = result.get("symbol").and_then(|v| v.as_str()).map(|v| v.to_string());
+    let reusable = result.get("reused_context_count").cloned();
+    let mut fields = vec![
+        ("context_count", json!(context_count)),
+        ("reference_count", json!(ref_count)),
+        ("symbol", json!(symbol)),
+    ];
+    if let Some(value) = reusable {
+        fields.push(("reused_context_count", value));
+    }
+    fields
 }
 
 fn build_context_payload(planned_context: &serde_json::Value, max_chars: usize) -> String {

@@ -36,6 +36,7 @@ debug_graph = { path = "../debug_graph" }
 test_coverage = { path = "../test_coverage" }
 test_planner = { path = "../test_planner" }
 pipeline_graph = { path = "../pipeline_graph" }
+telemetry = { path = "../telemetry" }
 
 [dev-dependencies]
 tempfile = "3"

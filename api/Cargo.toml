@@ -21,3 +21,4 @@ watcher = { path = "../watcher" }
 refactor_graph = { path = "../refactor_graph" }
 debug_graph = { path = "../debug_graph" }
 pipeline_graph = { path = "../pipeline_graph" }
+telemetry = { path = "../telemetry" }

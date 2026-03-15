@@ -6,7 +6,7 @@ This file tracks notable `POST /ab_test_dev` outcomes after major retrieval/plan
 
 Configuration:
 
-- `provider=openai`
+- `provider=<provider_key>`
 - `autoroute_first=true`
 - `single_file_fast_path=true`
 - suite: `dev_suite_v2:todo_app_10_tasks` (11 tasks)
@@ -42,7 +42,7 @@ Latest gating signals (run B):
 ```bash
 curl -X POST "$SEMANTIC_API_BASE_URL/ab_test_dev" \
   -H "content-type: application/json" \
-  -d '{"provider":"openai","autoroute_first":true,"single_file_fast_path":true}'
+  -d '{"provider":"<provider_key>","autoroute_first":true,"single_file_fast_path":true}'
 ```
 
 3. Inspect:

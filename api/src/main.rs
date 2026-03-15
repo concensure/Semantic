@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use storage::default_paths;
+use telemetry::{metadata_pairs, TaskScope, TelemetrySink};
 use tracing::{error, info};
 use watcher::RepoWatcher;
 
@@ -144,6 +145,51 @@ fn now_epoch_s() -> u64 {
         .unwrap_or_default()
 }
 
+fn next_task_scope(telemetry: &TelemetrySink, session_id: Option<&str>, route_id: &str) -> TaskScope {
+    TaskScope {
+        session_id: session_id.map(|v| v.to_string()),
+        task_id: telemetry.next_event_id("task"),
+        route_id: route_id.to_string(),
+    }
+}
+
+fn emit_task_started(
+    telemetry: &TelemetrySink,
+    scope: &TaskScope,
+    category: &str,
+    metadata: serde_json::Value,
+) {
+    let mut event = telemetry.event(Some(scope), "task_started", "api", Some(category));
+    event.status = Some("started".to_string());
+    event.metadata = telemetry.sanitize_metadata(metadata);
+    telemetry.emit(event);
+}
+
+fn emit_task_finished(
+    telemetry: &TelemetrySink,
+    scope: &TaskScope,
+    category: &str,
+    response: &serde_json::Value,
+) {
+    let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut event = telemetry.event(
+        Some(scope),
+        if ok { "task_completed" } else { "task_failed" },
+        "api",
+        Some(category),
+    );
+    event.status = Some(if ok { "ok" } else { "error" }.to_string());
+    event.error_code = response
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    event.metadata = telemetry.sanitize_metadata(metadata_pairs([
+        ("route_id", serde_json::json!(scope.route_id)),
+        ("response", response.clone()),
+    ]));
+    telemetry.emit(event);
+}
+
 fn touch_or_create_session<'a>(
     middleware: &'a mut SemanticMiddlewareState,
     session_id: &str,
@@ -218,149 +264,169 @@ async fn retrieve(
     State(state): State<AppState>,
     Json(body): Json<RetrieveRequestBody>,
 ) -> Json<serde_json::Value> {
-    // Dispatch unified operations that were previously separate endpoints
-    match &body.request.operation {
-        Operation::GetControlFlowHints => {
-            let symbol = body.request.name.clone()
-                .or_else(|| body.request.query.clone())
-                .unwrap_or_default();
-            return match state.retrieval.lock().get_control_flow_hints(&symbol) {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_control_flow_hints", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
+    let telemetry = state.retrieval.lock().telemetry();
+    let scope = next_task_scope(&telemetry, body.session_id.as_deref(), "retrieve");
+    emit_task_started(
+        &telemetry,
+        &scope,
+        "tool_routing",
+        metadata_pairs([
+            ("operation", serde_json::json!(body.request.operation)),
+            ("session_id", serde_json::json!(body.session_id)),
+            ("single_file_fast_path", serde_json::json!(body.single_file_fast_path)),
+            ("reference_only", serde_json::json!(body.reference_only)),
+            ("mapping_mode", serde_json::json!(body.mapping_mode)),
+            ("max_footprint_items", serde_json::json!(body.max_footprint_items)),
+        ]),
+    );
+
+    let response = telemetry.with_task_scope(scope.clone(), || {
+        // Dispatch unified operations that were previously separate endpoints
+        match &body.request.operation {
+            Operation::GetControlFlowHints => {
+                let symbol = body.request.name.clone()
+                    .or_else(|| body.request.query.clone())
+                    .unwrap_or_default();
+                return Json(match state.retrieval.lock().get_control_flow_hints(&symbol) {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_control_flow_hints", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetDataFlowHints => {
+                let symbol = body.request.name.clone()
+                    .or_else(|| body.request.query.clone())
+                    .unwrap_or_default();
+                return Json(match state.retrieval.lock().get_data_flow_hints(&symbol) {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_data_flow_hints", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetHybridRankedContext => {
+                let query = body.request.query.clone().unwrap_or_default();
+                let max_tokens = body.request.max_tokens.unwrap_or(1400);
+                let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
+                return Json(match state.retrieval.lock().get_hybrid_ranked_context(&query, max_tokens, single_file_fast_path) {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_hybrid_ranked_context", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetDebugGraph => {
+                return Json(match state.retrieval.lock().get_debug_graph() {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_debug_graph", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetPipelineGraph => {
+                return Json(match state.retrieval.lock().get_pipeline_graph() {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_pipeline_graph", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetRootCauseCandidates => {
+                return Json(match state.retrieval.lock().get_root_cause_candidates() {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_root_cause_candidates", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetTestGaps => {
+                return Json(match state.retrieval.lock().get_test_gaps() {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_test_gaps", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetDeploymentHistory => {
+                return Json(match state.retrieval.lock().get_deployment_history() {
+                    Ok(result) => serde_json::json!({"ok": true, "operation": "get_deployment_history", "result": result}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::GetPerformanceStats => {
+                return Json(serde_json::json!({
+                    "ok": true,
+                    "operation": "get_performance_stats",
+                    "result": state.retrieval.lock().get_performance_stats()
+                }));
+            }
+            _ => {}
         }
-        Operation::GetDataFlowHints => {
-            let symbol = body.request.name.clone()
-                .or_else(|| body.request.query.clone())
-                .unwrap_or_default();
-            return match state.retrieval.lock().get_data_flow_hints(&symbol) {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_data_flow_hints", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetHybridRankedContext => {
-            let query = body.request.query.clone().unwrap_or_default();
-            let max_tokens = body.request.max_tokens.unwrap_or(1400);
-            let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
-            return match state.retrieval.lock().get_hybrid_ranked_context(&query, max_tokens, single_file_fast_path) {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_hybrid_ranked_context", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetDebugGraph => {
-            return match state.retrieval.lock().get_debug_graph() {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_debug_graph", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetPipelineGraph => {
-            return match state.retrieval.lock().get_pipeline_graph() {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_pipeline_graph", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetRootCauseCandidates => {
-            return match state.retrieval.lock().get_root_cause_candidates() {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_root_cause_candidates", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetTestGaps => {
-            return match state.retrieval.lock().get_test_gaps() {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_test_gaps", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetDeploymentHistory => {
-            return match state.retrieval.lock().get_deployment_history() {
-                Ok(result) => Json(serde_json::json!({"ok": true, "operation": "get_deployment_history", "result": result})),
-                Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-            };
-        }
-        Operation::GetPerformanceStats => {
+
+        if body.semantic_enabled == Some(false) {
             return Json(serde_json::json!({
                 "ok": true,
-                "operation": "get_performance_stats",
-                "result": state.retrieval.lock().get_performance_stats()
+                "semantic_enabled": false,
+                "skipped": true,
+                "message": "Semantic layer disabled for this request."
             }));
         }
-        _ => {}
-    }
 
-    if body.semantic_enabled == Some(false) {
-        return Json(serde_json::json!({
-            "ok": true,
-            "semantic_enabled": false,
-            "skipped": true,
-            "message": "Semantic layer disabled for this request."
-        }));
-    }
-
-    let mut request = body.request;
-    if body.input_compressed == Some(true) && should_block_compressed_semantic(&request.operation) {
-        if let Some(original_query) = body.original_query {
-            if request.query.is_none() {
-                request.query = Some(original_query.clone());
-            }
-            if request.name.is_none() {
-                request.name = Some(original_query);
-            }
-        } else {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": "input_compressed=true can reduce semantic retrieval precision. Send original_query or disable compression for semantic operations."
-            }));
-        }
-    }
-
-    let query_for_session = request.query.clone();
-    let result = state
-        .retrieval
-        .lock()
-        .handle_with_options_ext(
-            request,
-            body.single_file_fast_path,
-            Some(!body.reference_only.unwrap_or(true)),
-            body.mapping_mode.as_deref(),
-            body.max_footprint_items,
-        );
-    match result {
-        Ok(mut response) => {
-            let mut reused_context_count = 0usize;
-            if let Some(session_id) = body.session_id.as_ref() {
-                let index_revision = state.retrieval.lock().index_revision();
-                let mut middleware = state.semantic_middleware.lock();
-                let session = touch_or_create_session(&mut middleware, session_id, index_revision);
-                if body.reuse_session_context.unwrap_or(true) {
-                    reused_context_count = apply_session_context_reuse(&mut response.result, session);
+        let mut request = body.request;
+        if body.input_compressed == Some(true) && should_block_compressed_semantic(&request.operation) {
+            if let Some(original_query) = body.original_query {
+                if request.query.is_none() {
+                    request.query = Some(original_query.clone());
                 }
-                if let Some(symbol) = response.result.get("symbol").and_then(|v| v.as_str()) {
-                    session.last_target_symbols.push_back(symbol.to_string());
-                    while session.last_target_symbols.len() > 32 {
-                        session.last_target_symbols.pop_front();
+                if request.name.is_none() {
+                    request.name = Some(original_query);
+                }
+            } else {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": "input_compressed=true can reduce semantic retrieval precision. Send original_query or disable compression for semantic operations."
+                }));
+            }
+        }
+
+        let query_for_session = request.query.clone();
+        let result = state
+            .retrieval
+            .lock()
+            .handle_with_options_ext(
+                request,
+                body.single_file_fast_path,
+                Some(!body.reference_only.unwrap_or(true)),
+                body.mapping_mode.as_deref(),
+                body.max_footprint_items,
+            );
+        match result {
+            Ok(mut response) => {
+                let mut reused_context_count = 0usize;
+                if let Some(session_id) = body.session_id.as_ref() {
+                    let index_revision = state.retrieval.lock().index_revision();
+                    let mut middleware = state.semantic_middleware.lock();
+                    let session = touch_or_create_session(&mut middleware, session_id, index_revision);
+                    if body.reuse_session_context.unwrap_or(true) {
+                        reused_context_count = apply_session_context_reuse(&mut response.result, session);
                     }
-                }
-                if let Some(query) = query_for_session.as_ref() {
                     if let Some(symbol) = response.result.get("symbol").and_then(|v| v.as_str()) {
-                        session
-                            .intent_symbol_cache
-                            .insert(query.to_lowercase(), symbol.to_string());
+                        session.last_target_symbols.push_back(symbol.to_string());
+                        while session.last_target_symbols.len() > 32 {
+                            session.last_target_symbols.pop_front();
+                        }
+                    }
+                    if let Some(query) = query_for_session.as_ref() {
+                        if let Some(symbol) = response.result.get("symbol").and_then(|v| v.as_str()) {
+                            session
+                                .intent_symbol_cache
+                                .insert(query.to_lowercase(), symbol.to_string());
+                        }
                     }
                 }
+                if let Some(obj) = response.result.as_object_mut() {
+                    obj.insert("reused_context_count".to_string(), serde_json::json!(reused_context_count));
+                }
+                Json(success(response))
             }
-            if let Some(obj) = response.result.as_object_mut() {
-                obj.insert("reused_context_count".to_string(), serde_json::json!(reused_context_count));
+            Err(err) => {
+                error!("retrieval failed: {err}");
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": err.to_string(),
+                }))
             }
-            Json(success(response))
         }
-        Err(err) => {
-            error!("retrieval failed: {err}");
-            Json(serde_json::json!({
-                "ok": false,
-                "error": err.to_string(),
-            }))
-        }
-    }
+    });
+    emit_task_finished(&telemetry, &scope, "tool_routing", &response.0);
+    response
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -418,6 +484,20 @@ async fn ide_autoroute(
     State(state): State<AppState>,
     Json(body): Json<IdeAutoRouteRequest>,
 ) -> Json<serde_json::Value> {
+    let telemetry = state.retrieval.lock().telemetry();
+    let scope = next_task_scope(&telemetry, body.session_id.as_deref(), "ide_autoroute");
+    emit_task_started(
+        &telemetry,
+        &scope,
+        "tool_routing",
+        metadata_pairs([
+            ("task", serde_json::json!(body.task)),
+            ("action", serde_json::json!(body.action)),
+            ("session_id", serde_json::json!(body.session_id)),
+            ("max_tokens", serde_json::json!(body.max_tokens)),
+        ]),
+    );
+    let response = telemetry.with_task_scope(scope.clone(), || {
     // Action-oriented dispatch: handle structured actions before intent-based routing
     if let Some(ref action) = body.action {
         let input = body.action_input.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -773,6 +853,9 @@ async fn ide_autoroute(
         "reused_context_count": reused_context_count,
         "result": result
     }))
+    });
+    emit_task_finished(&telemetry, &scope, "tool_routing", &response.0);
+    response
 }
 
 fn detect_ide_intent(task: &str) -> &'static str {
@@ -1025,46 +1108,63 @@ async fn edit(
     State(state): State<AppState>,
     Json(body): Json<EditRequestBody>,
 ) -> Json<serde_json::Value> {
-    {
-        let mut middleware = state.semantic_middleware.lock();
-        let now = now_epoch_s();
-        middleware
-            .sessions
-            .retain(|_, v| now.saturating_sub(v.last_seen_epoch_s) <= SESSION_TTL_SECS);
-        if middleware.semantic_first_enabled {
-            let session_id = body.session_id.as_deref().unwrap_or_default();
-            if session_id.is_empty() || !middleware.sessions.contains_key(session_id) {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": "semantic-first middleware blocked edit: call /retrieve first with a session_id, then retry /edit with the same session_id."
-                }));
+    let telemetry = state.retrieval.lock().telemetry();
+    let scope = next_task_scope(&telemetry, body.session_id.as_deref(), "edit");
+    emit_task_started(
+        &telemetry,
+        &scope,
+        "code_generation",
+        metadata_pairs([
+            ("symbol", serde_json::json!(body.symbol)),
+            ("session_id", serde_json::json!(body.session_id)),
+            ("max_tokens", serde_json::json!(body.max_tokens)),
+            ("run_tests", serde_json::json!(body.run_tests)),
+        ]),
+    );
+    let response = telemetry.with_task_scope(scope.clone(), || {
+        {
+            let mut middleware = state.semantic_middleware.lock();
+            let now = now_epoch_s();
+            middleware
+                .sessions
+                .retain(|_, v| now.saturating_sub(v.last_seen_epoch_s) <= SESSION_TTL_SECS);
+            if middleware.semantic_first_enabled {
+                let session_id = body.session_id.as_deref().unwrap_or_default();
+                if session_id.is_empty() || !middleware.sessions.contains_key(session_id) {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": "semantic-first middleware blocked edit: call /retrieve first with a session_id, then retry /edit with the same session_id."
+                    }));
+                }
             }
         }
-    }
 
-    let request = RetrievalRequest {
-        operation: Operation::PlanSafeEdit,
-        name: Some(body.symbol),
-        query: None,
-        file: None,
-        start_line: None,
-        end_line: None,
-        max_tokens: Some(body.max_tokens.unwrap_or(4000)),
-        workspace_scope: None,
-        limit: None,
-        node_id: None,
-        radius: None,
-        logic_radius: None,
-        dependency_radius: None,
-        edit_description: Some(body.edit),
-        patch_mode: body.patch_mode,
-        run_tests: body.run_tests,
-    };
-    let result = state.retrieval.lock().handle(request);
-    match result {
-        Ok(response) => Json(success(response)),
-        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-    }
+        let request = RetrievalRequest {
+            operation: Operation::PlanSafeEdit,
+            name: Some(body.symbol),
+            query: None,
+            file: None,
+            start_line: None,
+            end_line: None,
+            max_tokens: Some(body.max_tokens.unwrap_or(4000)),
+            workspace_scope: None,
+            limit: None,
+            node_id: None,
+            radius: None,
+            logic_radius: None,
+            dependency_radius: None,
+            edit_description: Some(body.edit),
+            patch_mode: body.patch_mode,
+            run_tests: body.run_tests,
+        };
+        let result = state.retrieval.lock().handle(request);
+        match result {
+            Ok(response) => Json(success(response)),
+            Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+        }
+    });
+    emit_task_finished(&telemetry, &scope, "code_generation", &response.0);
+    response
 }
 
 #[derive(Debug, serde::Deserialize)]

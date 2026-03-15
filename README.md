@@ -30,6 +30,27 @@ cargo run -p api -- ./test_repo
 
 Service binds to `$SEMANTIC_API_BASE_URL`.
 
+## Optional Token Tracking Add-On
+
+An optional local companion in this repository can track token usage per task across `retrieve`, `ide_autoroute`, and `edit`.
+
+1. Copy `.semantic/token_tracking.example.toml` to `.semantic/token_tracking.toml`.
+2. Set `enabled = true`.
+3. Run the core API as usual.
+4. Run the dashboard:
+
+```bash
+cargo run -p token_tracking -- ./test_repo
+```
+
+Telemetry is written as NDJSON to `.semantic/token_tracking/events.ndjson` and ingested into `.semantic/token_tracking/tracker.sqlite`.
+
+Privacy defaults:
+
+- `strict`: metrics only, hashed paths, no prompt bodies
+- `balanced`: small redacted snippets
+- `debug`: richer local capture
+
 ## Two-Tool MCP Surface
 
 The MCP bridge (`mcp_bridge`) exposes **two primary tools** that cover all use cases:
@@ -59,7 +80,7 @@ Demo project used by the development A/B suite:
 
 ## Latest A/B Benchmark Update (2026-03-13)
 
-Recent `POST /ab_test_dev` runs with `provider=openai`, `autoroute_first=true`, and `single_file_fast_path=true`:
+Recent `POST /ab_test_dev` runs with one representative hosted-provider configuration, `autoroute_first=true`, and `single_file_fast_path=true`:
 
 - prior baseline: `-18.62%` token savings (`9738` -> `11551`)
 - improved run: `+8.07%` token savings (`9365` -> `8609`)

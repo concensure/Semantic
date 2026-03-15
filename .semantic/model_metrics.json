@@ -1,8 +1,5 @@
 {
-  "openai": { "success_rate": 0.95, "latency_ms": 350, "token_cost": 0.40 },
-  "anthropic": { "success_rate": 0.94, "latency_ms": 450, "token_cost": 0.38 },
-  "gemini": { "success_rate": 0.92, "latency_ms": 400, "token_cost": 0.30 },
-  "openrouter": { "success_rate": 0.90, "latency_ms": 500, "token_cost": 0.25 },
-  "together": { "success_rate": 0.88, "latency_ms": 420, "token_cost": 0.18 },
-  "ollama": { "success_rate": 0.85, "latency_ms": 900, "token_cost": 0.00 }
+  "primary": { "success_rate": 0.95, "latency_ms": 350, "token_cost": 0.40 },
+  "secondary": { "success_rate": 0.92, "latency_ms": 450, "token_cost": 0.30 },
+  "local": { "success_rate": 0.85, "latency_ms": 900, "token_cost": 0.00 }
 }

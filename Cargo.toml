@@ -1,5 +1,7 @@
 [workspace]
 members = [
+  "telemetry",
+  "token_tracking",
   "engine",
   "parser",
   "storage",

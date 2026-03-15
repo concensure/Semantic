@@ -1,36 +1,21 @@
 # Provider endpoints
-# Use the provider base URLs here.
+# Use placeholders in shared config. Set real endpoints only in local or private config.
 [providers]
-openai = "https://api.openai.com/v1" # example
-anthropic = "https://api.anthropic.com" # example
-# gemini = "https://generativelanguage.googleapis.com" # optional
-# openrouter = "https://openrouter.ai/api/v1" # optional
-# together = "https://api.together.xyz" # optional
-# ollama = "<OLLAMA_BASE_URL>" # local
+primary = "<PRIMARY_PROVIDER_BASE_URL>"
+secondary = "<SECONDARY_PROVIDER_BASE_URL>"
+# local = "<LOCAL_PROVIDER_BASE_URL>"
 
 # Per-provider settings
 # model: model id or name
-# api_key_env: name of the environment variable that holds the API key
-[provider_settings.openai]
-model = "gpt-4o-mini" # example
-api_key_env = "OPENAI_API_KEY" # required for OpenAI
+# api_key_env: name of the environment variable that holds the API key locally
+[provider_settings.primary]
+model = "<PRIMARY_MODEL_NAME>"
+api_key_env = "PRIMARY_LLM_API_KEY"
 
-[provider_settings.anthropic]
-model = "claude-3-5-sonnet-latest" # example
-api_key_env = "ANTHROPIC_API_KEY" # required for Anthropic
+[provider_settings.secondary]
+model = "<SECONDARY_MODEL_NAME>"
+api_key_env = "SECONDARY_LLM_API_KEY"
 
-[provider_settings.gemini]
-model = "gemini-1.5-pro" # example
-api_key_env = "GEMINI_API_KEY"
-
-[provider_settings.openrouter]
-model = "openai/gpt-4o-mini" # example
-api_key_env = "OPENROUTER_API_KEY"
-
-[provider_settings.together]
-model = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo" # example
-api_key_env = "TOGETHER_API_KEY"
-
-[provider_settings.ollama]
-model = "llama3.1:8b" # local model name
-# api_key_env not required for ollama
+[provider_settings.local]
+model = "<LOCAL_MODEL_NAME>"
+# api_key_env not required for local providers
