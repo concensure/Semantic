@@ -45,6 +45,8 @@ Key API endpoints:
 - `POST /ide_autoroute` — intent routing and action dispatch
 - `PATCH /edit` — safe edit planning/execution
 
+Legacy MCP tool aliases are preserved for compatibility, but they are now routed through `retrieve` or `ide_autoroute` instead of depending on separate primary entrypoints.
+
 Default retrieval behavior:
 
 - `reference_only=true` (structured references first, raw code minimized)
@@ -118,6 +120,17 @@ Implemented graph semantics now include:
 - semantic labels on logic nodes (`get_logic_nodes`)
 - clustered logic regions (`get_logic_clusters`)
 - hybrid graph ranking that blends symbol, dependency, and graph-density signals
+
+## Phase 5 Maturity
+
+Implemented maturity features now include:
+
+- SQLite-backed planned-context cache with automatic invalidation on index changes
+- policy-driven token caps and adaptive retrieval thresholds
+- anti-bloat controls for small single-file tasks
+- quality-gated A/B evaluation with validated patch/test signals
+- p95/p99 latency alerts and cache hit-rate alerts in `GetPerformanceStats`
+- full MCP compatibility through the two primary tools: `retrieve` and `ide_autoroute`
 
 ## Module Graph and Hierarchy
 
@@ -223,5 +236,6 @@ curl -X POST "$SEMANTIC_API_BASE_URL/retrieve" \
 
 - Storage paths: `./.semantic/semantic.db` and `./.semantic/tantivy/`.
 - Index performance stats: `./.semantic/index_performance.json`.
+- Retrieval policy template: `./.semantic/retrieval_policy.example.toml`.
 - Watcher reindexes changed files incrementally.
 - Runtime docs use environment placeholders such as `$SEMANTIC_API_BASE_URL`; do not commit local URLs, API keys, or tokens.

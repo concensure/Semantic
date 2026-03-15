@@ -162,6 +162,7 @@ async fn list_tools() -> Json<serde_json::Value> {
             notes: Some(
                 "Unified retrieval tool. Pass `operation` to select behaviour: \
                 GetRepoMap | GetFileOutline | SearchSymbol | GetCodeSpan | GetLogicNodes | \
+                GetControlFlowSlice | GetDataFlowSlice | GetLogicClusters | \
                 GetDependencyNeighborhood | GetReasoningContext | GetPlannedContext | PlanSafeEdit | \
                 GetControlFlowHints (name=symbol) | GetDataFlowHints (name=symbol) | \
                 GetHybridRankedContext (query, max_tokens) | GetDebugGraph | GetPipelineGraph | \
@@ -181,7 +182,11 @@ async fn list_tools() -> Json<serde_json::Value> {
                 debug_failure (event_id, repository, timestamp, failure_type, stack_trace, error_message) | \
                 generate_tests (target_symbol, framework?) | \
                 apply_tests (repository, target_symbol, framework?) | \
-                analyze_pipeline (failure_stage, failure_message).",
+                analyze_pipeline (failure_stage, failure_message) | llm_tools | patch_memory | \
+                patch_stats | model_performance | organization_graph | service_graph | \
+                plan_org_refactor | org_refactor_status | refactor_status | evolution_issues | \
+                evolution_plans | generate_evolution_plan | todo_seed | todo_tasks | ab_test_dev | \
+                ab_test_dev_results | semantic_middleware_get | semantic_middleware_set | env_check.",
             ),
         },
     ];
@@ -205,11 +210,29 @@ async fn list_tools() -> Json<serde_json::Value> {
         MCPToolSpec { name: "ab_test_dev", method: "POST", endpoint: "/ab_test_dev", notes: Some("accepts single_file_fast_path=true|false") },
         MCPToolSpec { name: "ab_test_dev_results", method: "GET", endpoint: "/ab_test_dev", notes: None },
         MCPToolSpec { name: "llm_tools", method: "GET", endpoint: "/llm_tools", notes: None },
+        MCPToolSpec { name: "patch_memory", method: "GET", endpoint: "/patch_memory", notes: Some("legacy — use ide_autoroute with action=patch_memory") },
+        MCPToolSpec { name: "patch_stats", method: "GET", endpoint: "/patch_stats", notes: Some("legacy — use ide_autoroute with action=patch_stats") },
+        MCPToolSpec { name: "model_performance", method: "GET", endpoint: "/model_performance", notes: Some("legacy — use ide_autoroute with action=model_performance") },
+        MCPToolSpec { name: "organization_graph", method: "GET", endpoint: "/organization_graph", notes: Some("legacy — use ide_autoroute with action=organization_graph") },
+        MCPToolSpec { name: "service_graph", method: "GET", endpoint: "/service_graph", notes: Some("legacy — use ide_autoroute with action=service_graph") },
+        MCPToolSpec { name: "plan_org_refactor", method: "POST", endpoint: "/plan_org_refactor", notes: Some("legacy — use ide_autoroute with action=plan_org_refactor") },
+        MCPToolSpec { name: "org_refactor_status", method: "GET", endpoint: "/org_refactor_status", notes: Some("legacy — use ide_autoroute with action=org_refactor_status") },
+        MCPToolSpec { name: "refactor_status", method: "GET", endpoint: "/refactor_status", notes: Some("legacy — use ide_autoroute with action=refactor_status") },
+        MCPToolSpec { name: "evolution_issues", method: "GET", endpoint: "/evolution_issues", notes: Some("legacy — use ide_autoroute with action=evolution_issues") },
+        MCPToolSpec { name: "evolution_plans", method: "GET", endpoint: "/evolution_plans", notes: Some("legacy — use ide_autoroute with action=evolution_plans") },
+        MCPToolSpec { name: "generate_evolution_plan", method: "POST", endpoint: "/generate_evolution_plan", notes: Some("legacy — use ide_autoroute with action=generate_evolution_plan") },
+        MCPToolSpec { name: "todo_seed", method: "POST", endpoint: "/todo/seed", notes: Some("legacy — use ide_autoroute with action=todo_seed") },
+        MCPToolSpec { name: "todo_tasks", method: "GET", endpoint: "/todo/tasks", notes: Some("legacy — use ide_autoroute with action=todo_tasks") },
+        MCPToolSpec { name: "semantic_middleware", method: "GET", endpoint: "/semantic_middleware", notes: Some("legacy — use ide_autoroute with action=semantic_middleware_get") },
+        MCPToolSpec { name: "env_check", method: "GET", endpoint: "/env_check", notes: Some("legacy — use ide_autoroute with action=env_check") },
         MCPToolSpec { name: "get_repo_map", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetRepoMap") },
         MCPToolSpec { name: "get_file_outline", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetFileOutline") },
         MCPToolSpec { name: "search_symbol", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=SearchSymbol") },
         MCPToolSpec { name: "get_code_span", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetCodeSpan") },
         MCPToolSpec { name: "get_logic_nodes", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetLogicNodes") },
+        MCPToolSpec { name: "get_control_flow_slice", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetControlFlowSlice") },
+        MCPToolSpec { name: "get_data_flow_slice", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetDataFlowSlice") },
+        MCPToolSpec { name: "get_logic_clusters", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetLogicClusters") },
         MCPToolSpec { name: "get_dependency_neighborhood", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetDependencyNeighborhood") },
         MCPToolSpec { name: "get_reasoning_context", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetReasoningContext") },
         MCPToolSpec { name: "get_planned_context", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetPlannedContext") },
@@ -235,9 +258,6 @@ fn resolve_tool_request(
         }
         return Ok(("POST", "/retrieve", Some(payload)));
     }
-    if let Ok((method, endpoint)) = map_tool(name) {
-        return Ok((method, endpoint, Some(input)));
-    }
     if let Some(operation) = map_retrieve_operation(name) {
         let mut payload = match input {
             serde_json::Value::Object(map) => serde_json::Value::Object(map),
@@ -250,6 +270,19 @@ fn resolve_tool_request(
                 .or_insert(serde_json::json!(true));
         }
         return Ok(("POST", "/retrieve", Some(payload)));
+    }
+    if let Some(action) = map_ide_action(name) {
+        return Ok((
+            "POST",
+            "/ide_autoroute",
+            Some(serde_json::json!({
+                "action": action,
+                "action_input": input
+            })),
+        ));
+    }
+    if let Ok((method, endpoint)) = map_tool(name) {
+        return Ok((method, endpoint, Some(input)));
     }
     Err((StatusCode::BAD_REQUEST, format!("unknown tool '{name}'")))
 }
@@ -288,6 +321,9 @@ fn map_retrieve_operation(name: &str) -> Option<&'static str> {
         "search_symbol" => Some("SearchSymbol"),
         "get_code_span" => Some("GetCodeSpan"),
         "get_logic_nodes" => Some("GetLogicNodes"),
+        "get_control_flow_slice" => Some("GetControlFlowSlice"),
+        "get_data_flow_slice" => Some("GetDataFlowSlice"),
+        "get_logic_clusters" => Some("GetLogicClusters"),
         "get_dependency_neighborhood" => Some("GetDependencyNeighborhood"),
         "get_reasoning_context" => Some("GetReasoningContext"),
         "get_planned_context" => Some("GetPlannedContext"),
@@ -303,5 +339,62 @@ fn map_retrieve_operation(name: &str) -> Option<&'static str> {
         "get_deployment_history" => Some("GetDeploymentHistory"),
         "get_performance_stats" => Some("GetPerformanceStats"),
         _ => None,
+    }
+}
+
+fn map_ide_action(name: &str) -> Option<&'static str> {
+    match name {
+        "debug_failure" => Some("debug_failure"),
+        "generate_tests" => Some("generate_tests"),
+        "apply_tests" => Some("apply_tests"),
+        "analyze_pipeline" => Some("analyze_pipeline"),
+        "llm_tools" => Some("llm_tools"),
+        "patch_memory" => Some("patch_memory"),
+        "patch_stats" => Some("patch_stats"),
+        "model_performance" => Some("model_performance"),
+        "organization_graph" => Some("organization_graph"),
+        "service_graph" => Some("service_graph"),
+        "plan_org_refactor" => Some("plan_org_refactor"),
+        "org_refactor_status" => Some("org_refactor_status"),
+        "refactor_status" => Some("refactor_status"),
+        "evolution_issues" => Some("evolution_issues"),
+        "evolution_plans" => Some("evolution_plans"),
+        "generate_evolution_plan" => Some("generate_evolution_plan"),
+        "todo_seed" => Some("todo_seed"),
+        "todo_tasks" => Some("todo_tasks"),
+        "ab_test_dev" => Some("ab_test_dev"),
+        "ab_test_dev_results" => Some("ab_test_dev_results"),
+        "semantic_middleware" => Some("semantic_middleware_get"),
+        "env_check" => Some("env_check"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_tool_request;
+    use serde_json::json;
+
+    #[test]
+    fn routes_graph_legacy_tool_through_retrieve() {
+        let (_, endpoint, payload) =
+            resolve_tool_request("get_control_flow_slice", json!({"name": "retryRequest"}))
+                .expect("resolve");
+        assert_eq!(endpoint, "/retrieve");
+        let payload = payload.expect("payload");
+        assert_eq!(
+            payload.get("operation").and_then(|v| v.as_str()),
+            Some("GetControlFlowSlice")
+        );
+    }
+
+    #[test]
+    fn routes_patch_memory_legacy_tool_through_ide_autoroute() {
+        let (_, endpoint, payload) =
+            resolve_tool_request("patch_memory", json!({"symbol": "retryRequest"}))
+                .expect("resolve");
+        assert_eq!(endpoint, "/ide_autoroute");
+        let payload = payload.expect("payload");
+        assert_eq!(payload.get("action").and_then(|v| v.as_str()), Some("patch_memory"));
     }
 }

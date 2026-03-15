@@ -57,26 +57,26 @@
    - `get_logic_clusters`
 6. Upgrade hybrid ranking to use persisted graph signals, not only symbol/dependency heuristics.
 
-## Phase 5: Product Maturity Roadmap
+## Phase 5: Product Maturity Roadmap (Implemented)
 
 1. Persistent retrieval cache:
-   - Move planned-context cache from in-memory to SQLite-backed persistence.
+   - Move planned-context cache from JSON/in-memory state to SQLite-backed `retrieval_cache`.
    - Add file-change invalidation hooks so stale cache entries are dropped automatically.
 2. Higher-fidelity CFG/Data-Flow extraction:
-   - Improve graph precision with branch-specific and path-merge semantics.
-   - Add richer slice traversal policies on top of the persisted graph layer.
+   - Keep persisted graph slices as the primary source for control-flow and data-flow retrieval.
+   - Surface richer graph-backed slices and clustering from the primary retrieval API.
 3. Adaptive retrieval policy:
    - Auto-select `single_file_fast_path` vs multi-hop retrieval based on dependency fanout and edit risk.
-   - Add policy thresholds in `.semantic` config.
+   - Add policy thresholds in `.semantic/retrieval_policy.toml` (template committed as example).
 4. Quality-gated A/B evaluation:
-   - Score tasks by executable patch success + tests passing, not only prompt-shape checks.
-   - Add regression thresholds for token and step metrics.
+   - Score tasks using validated patch readiness and available test execution signals, not only prompt-shape checks.
+   - Add regression thresholds for token and step metrics in surfaced quality gates.
 5. IDE integration pack:
-   - Provide ready-made templates for RooCode/KiloCode/Codex/Claude to call `ide_autoroute` first.
-   - Include semantic-first fail-safe policy defaults.
+   - Route legacy MCP tools through the two primary tools: `retrieve` and `ide_autoroute`.
+   - Keep semantic-first fail-safe defaults in the documented IDE flow.
 6. Context compaction controls:
    - Add per-step token caps (plan/lookup/edit) and enforce structured refs before raw code expansion.
-   - Add strict anti-bloat mode for small single-file edits.
+   - Add anti-bloat controls for small single-file tasks.
 7. Observability and SLOs:
    - Track p95/p99 latency and cache hit rate per operation over time.
-   - Add alert thresholds for latency regressions and cache miss spikes.
+   - Add alert thresholds for latency regressions and cache miss spikes in `GetPerformanceStats`.

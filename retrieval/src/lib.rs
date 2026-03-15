@@ -16,7 +16,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub struct RetrievalService {
     repo_root: PathBuf,
     storage: storage::Storage,
-    planned_context_cache: Mutex<HashMap<String, CachedContext>>,
     symbol_neighborhood_cache: Mutex<HashMap<String, CachedContext>>,
     prompt_fragment_cache: Mutex<HashMap<String, CachedPrompt>>,
     perf_stats: Mutex<PerfStats>,
@@ -35,6 +34,15 @@ struct CachedPrompt {
     cached_at_epoch_s: u64,
     source_revision: u64,
     prompt: String,
+}
+
+#[derive(Debug, Clone)]
+struct TestRunResult {
+    passed: bool,
+    command: String,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +102,49 @@ struct ContextTuning {
     guardrail_ratio: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RetrievalPolicy {
+    high_fanout_threshold: usize,
+    low_fanout_threshold: usize,
+    dense_logic_threshold: usize,
+    sparse_logic_threshold: usize,
+    max_dependency_radius: usize,
+    max_logic_radius: usize,
+    plan_token_cap: usize,
+    lookup_token_cap: usize,
+    edit_token_cap: usize,
+    small_repo_file_threshold: usize,
+    anti_bloat_small_task: bool,
+    p95_latency_alert_ms: u128,
+    p99_latency_alert_ms: u128,
+    min_cache_hit_rate_pct: f64,
+    prompt_overrun_alert_pct: f64,
+    step_regression_alert_pct: f64,
+}
+
+impl Default for RetrievalPolicy {
+    fn default() -> Self {
+        Self {
+            high_fanout_threshold: 12,
+            low_fanout_threshold: 4,
+            dense_logic_threshold: 24,
+            sparse_logic_threshold: 8,
+            max_dependency_radius: 3,
+            max_logic_radius: 3,
+            plan_token_cap: 3200,
+            lookup_token_cap: 1800,
+            edit_token_cap: 4000,
+            small_repo_file_threshold: 50,
+            anti_bloat_small_task: true,
+            p95_latency_alert_ms: 60,
+            p99_latency_alert_ms: 120,
+            min_cache_hit_rate_pct: 35.0,
+            prompt_overrun_alert_pct: 25.0,
+            step_regression_alert_pct: 10.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MappingMode {
     FootprintFirst,
@@ -111,15 +162,15 @@ impl MappingMode {
 
 impl RetrievalService {
     pub fn new(repo_root: PathBuf, storage: storage::Storage) -> Self {
-        let cache = load_planned_context_cache(&repo_root);
-        Self {
+        let service = Self {
             repo_root,
             storage,
-            planned_context_cache: Mutex::new(cache),
             symbol_neighborhood_cache: Mutex::new(HashMap::new()),
             prompt_fragment_cache: Mutex::new(HashMap::new()),
             perf_stats: Mutex::new(PerfStats::default()),
-        }
+        };
+        service.migrate_legacy_planned_context_cache();
+        service
     }
 
     pub fn repo_root(&self) -> &Path {
@@ -132,6 +183,31 @@ impl RetrievalService {
 
     pub fn load_env(&self) {
         load_env_from_file(&self.repo_root);
+    }
+
+    fn migrate_legacy_planned_context_cache(&self) {
+        let path = self
+            .repo_root
+            .join(".semantic")
+            .join("planned_context_cache.json");
+        let Ok(raw) = fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(entries) = serde_json::from_str::<HashMap<String, CachedContext>>(&raw) else {
+            return;
+        };
+        for (cache_key, entry) in entries {
+            let value_json = serde_json::to_string(&entry.value).ok();
+            let _ = self.storage.upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
+                cache_key,
+                cache_kind: "planned_context".to_string(),
+                value_json,
+                prompt_text: None,
+                cached_at_epoch_s: entry.cached_at_epoch_s,
+                source_revision: entry.source_revision,
+            });
+        }
+        let _ = fs::remove_file(path);
     }
 
     fn todo_tasks_path(&self) -> PathBuf {
@@ -262,9 +338,11 @@ impl RetrievalService {
             }
             Operation::GetPlannedContext => {
                 let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
-                let max_tokens = request
+                let requested_max_tokens = request
                     .max_tokens
                     .ok_or_else(|| anyhow!("max_tokens is required"))?;
+                let max_tokens =
+                    clamp_tokens_for_operation(&self.repo_root, "plan", requested_max_tokens);
                 self.get_planned_context(
                     &query,
                     max_tokens,
@@ -286,9 +364,11 @@ impl RetrievalService {
             }
             Operation::GetWorkspaceReasoningContext => {
                 let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
-                let max_tokens = request
+                let requested_max_tokens = request
                     .max_tokens
                     .ok_or_else(|| anyhow!("max_tokens is required"))?;
+                let max_tokens =
+                    clamp_tokens_for_operation(&self.repo_root, "lookup", requested_max_tokens);
                 self.get_workspace_reasoning_context(
                     &query,
                     max_tokens,
@@ -307,10 +387,15 @@ impl RetrievalService {
                 let edit_description = request
                     .edit_description
                     .ok_or_else(|| anyhow!("edit_description is required"))?;
+                let max_tokens = clamp_tokens_for_operation(
+                    &self.repo_root,
+                    "edit",
+                    request.max_tokens.unwrap_or(4000),
+                );
                 self.plan_safe_edit(
                     &symbol,
                     &edit_description,
-                    request.max_tokens.unwrap_or(4000),
+                    max_tokens,
                     request.patch_mode,
                     request.run_tests.unwrap_or(false),
                 )?
@@ -339,7 +424,8 @@ impl RetrievalService {
             }
             Operation::GetHybridRankedContext => {
                 let query = request.query.unwrap_or_default();
-                let max_tokens = request.max_tokens.unwrap_or(1400);
+                let max_tokens =
+                    clamp_tokens_for_operation(&self.repo_root, "lookup", request.max_tokens.unwrap_or(1400));
                 self.get_hybrid_ranked_context(
                     &query,
                     max_tokens,
@@ -377,11 +463,18 @@ impl RetrievalService {
                     let idx = ((sorted.len() as f64) * 0.95).floor() as usize;
                     sorted[idx.min(sorted.len() - 1)]
                 };
+                let p99_ms = if sorted.is_empty() {
+                    0
+                } else {
+                    let idx = ((sorted.len() as f64) * 0.99).floor() as usize;
+                    sorted[idx.min(sorted.len() - 1)]
+                };
                 json!({
                     "operation": name,
                     "calls": op.calls,
                     "avg_ms": avg_ms,
                     "p95_ms": p95_ms,
+                    "p99_ms": p99_ms,
                     "max_ms": op.max_ms,
                 })
             })
@@ -397,7 +490,11 @@ impl RetrievalService {
         let prompt_cache_misses = perf.prompt_cache_misses;
         let prompt_cache_evictions = perf.prompt_cache_evictions;
         drop(perf);
-        let cache_entries = self.planned_context_cache.lock().expect("cache lock").len();
+        let policy = load_retrieval_policy(&self.repo_root);
+        let cache_entries = self
+            .storage
+            .count_retrieval_cache_entries("planned_context")
+            .unwrap_or_default();
         let symbol_cache_entries = self
             .symbol_neighborhood_cache
             .lock()
@@ -408,6 +505,7 @@ impl RetrievalService {
             .lock()
             .expect("prompt cache lock")
             .len();
+        let cache_hit_rate = ratio_pct(cache_hits, cache_hits + cache_misses);
 
         json!({
             "targets": {
@@ -421,6 +519,7 @@ impl RetrievalService {
                 "hits": cache_hits,
                 "misses": cache_misses,
                 "evictions": cache_evictions,
+                "hit_rate_pct": cache_hit_rate,
             },
             "symbol_neighborhood_cache": {
                 "entries": symbol_cache_entries,
@@ -434,7 +533,8 @@ impl RetrievalService {
                 "misses": prompt_cache_misses,
                 "evictions": prompt_cache_evictions,
             },
-            "operations": op_stats
+            "operations": op_stats,
+            "alerts": build_observability_alerts(&op_stats, cache_hit_rate, policy)
         })
     }
 
@@ -769,7 +869,12 @@ impl RetrievalService {
             build_todo_dev_suite()
         };
         let requested_feature = feature_request.unwrap_or("todo app end-to-end suite");
-        let max_tokens = max_context_tokens.unwrap_or(1800);
+        let policy = load_retrieval_policy(&self.repo_root);
+        let max_tokens = clamp_tokens_for_operation(
+            &self.repo_root,
+            "plan",
+            max_context_tokens.unwrap_or(1800),
+        );
         let task_count = tasks.len();
 
         let routing_cfg =
@@ -816,6 +921,8 @@ impl RetrievalService {
         let mut total_success_without = 0usize;
         let mut total_success_with = 0usize;
         let mut semantic_exec_success = 0usize;
+        let mut validation_success = 0usize;
+        let mut tests_success = 0usize;
         let mut total_steps_without = 0usize;
         let mut total_steps_with = 0usize;
         let mut step_success_without = 0usize;
@@ -838,11 +945,29 @@ impl RetrievalService {
                     task.feature_request,
                     max_tokens,
                     Some(engine::PatchApplicationMode::PreviewOnly),
-                    false,
+                    true,
                 )
                 .ok();
-            if semantic_exec.is_some() {
+            let validation_passed = semantic_exec
+                .as_ref()
+                .and_then(|v| v.get("validation_result"))
+                .and_then(|v| v.get("passed"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let tests_passed = semantic_exec
+                .as_ref()
+                .and_then(|v| v.get("test_result"))
+                .and_then(|v| v.get("passed"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if semantic_exec.is_some() && validation_passed {
                 semantic_exec_success += 1;
+            }
+            if validation_passed {
+                validation_success += 1;
+            }
+            if tests_passed {
+                tests_success += 1;
             }
 
             let cache_key = format!(
@@ -1142,7 +1267,7 @@ impl RetrievalService {
             total_without += a_tokens;
             total_with += b_tokens_final;
             let success_without = a_hits >= 2;
-            let success_with = semantic_exec.is_some() && b_hits >= 1;
+            let success_with = semantic_exec.is_some() && validation_passed && b_hits >= 1;
             if let Some(steps) = estimate_steps_without_semantic(success_without, &a_output) {
                 total_steps_without += steps;
                 step_success_without += 1;
@@ -1188,7 +1313,9 @@ impl RetrievalService {
                 "editing_prompt_chars": editing_prompt_chars,
                 "reused_context_count": 0usize,
                 "success_without_semantic": success_without,
-                "success_with_semantic": success_with
+                "success_with_semantic": success_with,
+                "validation_passed": validation_passed,
+                "tests_passed": tests_passed
             });
             append_ab_test_task_metrics(&self.repo_root, &tracking_row)?;
 
@@ -1241,6 +1368,8 @@ impl RetrievalService {
                 "estimated_steps_with_semantic": estimate_steps_with_semantic(success_with, impacted_file_count.max(1), b_hits),
                 "success_without_semantic": success_without,
                 "success_with_semantic": success_with,
+                "validation_passed": validation_passed,
+                "tests_passed": tests_passed,
                 "semantic_execution": semantic_exec.unwrap_or_else(|| json!({"ok": false, "error": "plan_safe_edit failed"})),
             }));
         }
@@ -1254,6 +1383,8 @@ impl RetrievalService {
         let success_without_pct = (total_success_without as f32 / task_count_f) * 100.0;
         let success_with_pct = (total_success_with as f32 / task_count_f) * 100.0;
         let semantic_exec_pct = (semantic_exec_success as f32 / task_count_f) * 100.0;
+        let validation_success_pct = (validation_success as f32 / task_count_f) * 100.0;
+        let tests_success_pct = (tests_success as f32 / task_count_f) * 100.0;
         let step_savings_pct = if total_steps_without == 0 {
             0.0
         } else {
@@ -1312,6 +1443,10 @@ impl RetrievalService {
             "primary_metric": "fewest_total_steps_to_successful_code_change",
             "semantic_execution_success_count": semantic_exec_success,
             "semantic_execution_success_pct": semantic_exec_pct,
+            "validation_success_count": validation_success,
+            "validation_success_pct": validation_success_pct,
+            "tests_success_count": tests_success,
+            "tests_success_pct": tests_success_pct,
             "gating_metrics": {
                 "target_match_count": target_match_count,
                 "target_match_pct": target_match_pct,
@@ -1327,6 +1462,15 @@ impl RetrievalService {
                 "escalation_guardrail_skip_pct": escalation_guardrail_skip_pct,
                 "runtime_trim_applied": runtime_trim_applied,
                 "runtime_trim_applied_pct": runtime_trim_applied_pct,
+            },
+            "quality_gates": {
+                "primary_metric": "validated_patch_and_test_backed_task_success",
+                "validated_patch_success_pct": validation_success_pct,
+                "tests_success_pct": tests_success_pct,
+                "step_regression_alert_pct": policy.step_regression_alert_pct,
+                "token_overrun_alert_pct": policy.prompt_overrun_alert_pct,
+                "regression_alert": savings_pct < -(policy.prompt_overrun_alert_pct as f32)
+                    || step_savings_pct < -(policy.step_regression_alert_pct as f32),
             },
             "task_results": task_results,
         }))
@@ -1715,6 +1859,7 @@ impl RetrievalService {
         mapping_mode: Option<&str>,
         max_footprint_items: Option<usize>,
     ) -> Result<serde_json::Value> {
+        let policy = load_retrieval_policy(&self.repo_root);
         let include_raw_code = include_raw_code_override.unwrap_or(false);
         let preferred_symbol_key = preferred_symbol.unwrap_or("");
         let mapping_mode_key = mapping_mode.unwrap_or("footprint_first");
@@ -1817,7 +1962,7 @@ impl RetrievalService {
                 "intent": format!("{intent:?}").to_lowercase(),
                 "plan": plan,
                 "effective_breadth": breadth,
-                "small_repo_mode": self.storage.list_files()?.len() < 50,
+                "small_repo_mode": self.storage.list_files()?.len() < policy.small_repo_file_threshold,
                 "single_file_fast_path": true,
                 "retrieval_strategy": "single_file_fast_path",
                 "mapping_mode": mapping_mode_key,
@@ -1987,6 +2132,9 @@ impl RetrievalService {
         let selected = select_with_budget(context_items, &budget);
 
         let mut raw_budget_chars = max_tokens.saturating_mul(4).saturating_sub(1600).max(800);
+        if policy.anti_bloat_small_task && single_file_fast_path && file_count < policy.small_repo_file_threshold {
+            raw_budget_chars = raw_budget_chars.min(900);
+        }
         let assembled: Vec<serde_json::Value> = selected
             .into_iter()
             .map(|item| {
@@ -2033,7 +2181,7 @@ impl RetrievalService {
             "candidate_symbols": candidate_symbols,
             "confidence_score": confidence_score,
             "confidence_band": confidence_band,
-            "small_repo_mode": file_count < 50,
+            "small_repo_mode": file_count < policy.small_repo_file_threshold,
             "retrieval_strategy": "two_stage_rank_then_span_fetch",
             "include_raw_code": include_raw_code,
             "context": assembled,
@@ -2481,23 +2629,32 @@ impl RetrievalService {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let current_revision = current_index_revision(&self.repo_root);
-        let mut cache = self.planned_context_cache.lock().expect("cache lock");
-        let Some(entry) = cache.get_mut(key) else {
+        let Some(entry) = self
+            .storage
+            .get_retrieval_cache_entry(key, "planned_context")
+            .ok()
+            .flatten()
+        else {
             return None;
         };
         if now.saturating_sub(entry.cached_at_epoch_s) > ttl_seconds
             || entry.source_revision != current_revision
         {
-            cache.remove(key);
-            drop(cache);
+            let _ = self
+                .storage
+                .delete_retrieval_cache_entry(key, "planned_context");
             let mut perf = self.perf_stats.lock().expect("perf lock");
             perf.cache_evictions += 1;
             return None;
         }
-        if let Some(obj) = entry.value.as_object_mut() {
+        let mut value = entry
+            .value_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())?;
+        if let Some(obj) = value.as_object_mut() {
             obj.insert("cache".to_string(), json!({ "hit": true }));
         }
-        Some(entry.value.clone())
+        Some(value)
     }
 
     fn store_cached_context(&self, key: String, value: serde_json::Value, max_entries: usize) {
@@ -2506,31 +2663,22 @@ impl RetrievalService {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let source_revision = current_index_revision(&self.repo_root);
-        let mut cache = self.planned_context_cache.lock().expect("cache lock");
-        let mut evicted = false;
-        if cache.len() >= max_entries {
-            if let Some(oldest_key) = cache
-                .iter()
-                .min_by_key(|(_, v)| v.cached_at_epoch_s)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest_key);
-                evicted = true;
-            }
-        }
-        cache.insert(
-            key,
-            CachedContext {
-                cached_at_epoch_s: now,
-                source_revision,
-                value,
-            },
-        );
-        save_planned_context_cache(&self.repo_root, &cache);
-        drop(cache);
-        if evicted {
+        let serialized = serde_json::to_string(&value).ok();
+        let _ = self.storage.upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
+            cache_key: key,
+            cache_kind: "planned_context".to_string(),
+            value_json: serialized,
+            prompt_text: None,
+            cached_at_epoch_s: now,
+            source_revision,
+        });
+        let evicted = self
+            .storage
+            .prune_retrieval_cache_kind("planned_context", max_entries)
+            .unwrap_or_default();
+        if evicted > 0 {
             let mut perf = self.perf_stats.lock().expect("perf lock");
-            perf.cache_evictions += 1;
+            perf.cache_evictions += evicted;
         }
     }
 
@@ -2684,6 +2832,7 @@ impl RetrievalService {
         base_dependency_radius: usize,
         max_tokens: usize,
     ) -> Result<(usize, usize, serde_json::Value)> {
+        let policy = load_retrieval_policy(&self.repo_root);
         let direct_deps = self.storage.get_symbol_dependencies(target_id)?.len();
         let callers = self.storage.get_symbol_callers(target_id)?.len();
         let logic_nodes = self.storage.get_logic_nodes(target_id)?.len();
@@ -2696,15 +2845,15 @@ impl RetrievalService {
             logic_radius = 1;
             dependency_radius = 1;
         }
-        if fanout > 12 {
+        if fanout > policy.high_fanout_threshold {
             dependency_radius = dependency_radius.min(1);
-        } else if fanout < 4 && max_tokens > 2600 {
-            dependency_radius = dependency_radius.max(2).min(3);
+        } else if fanout < policy.low_fanout_threshold && max_tokens > 2600 {
+            dependency_radius = dependency_radius.max(2).min(policy.max_dependency_radius);
         }
-        if logic_nodes > 24 {
+        if logic_nodes > policy.dense_logic_threshold {
             logic_radius = logic_radius.min(1);
-        } else if logic_nodes < 8 && max_tokens > 2600 {
-            logic_radius = logic_radius.max(2).min(3);
+        } else if logic_nodes < policy.sparse_logic_threshold && max_tokens > 2600 {
+            logic_radius = logic_radius.max(2).min(policy.max_logic_radius);
         }
 
         Ok((
@@ -2720,7 +2869,13 @@ impl RetrievalService {
                 "callers": callers,
                 "logic_nodes": logic_nodes,
                 "max_tokens": max_tokens,
-                "policy": "adaptive_case_by_case"
+                "policy": "adaptive_case_by_case",
+                "policy_thresholds": {
+                    "high_fanout_threshold": policy.high_fanout_threshold,
+                    "low_fanout_threshold": policy.low_fanout_threshold,
+                    "dense_logic_threshold": policy.dense_logic_threshold,
+                    "sparse_logic_threshold": policy.sparse_logic_threshold,
+                }
             }),
         ))
     }
@@ -2794,6 +2949,23 @@ impl RetrievalService {
             }
             engine::PatchRepresentation::UnifiedDiff(diff) => diff.clone(),
         };
+        let existing_code = if file_path.is_empty() {
+            String::new()
+        } else {
+            fs::read_to_string(self.repo_root.join(&file_path)).unwrap_or_default()
+        };
+        let validation_result =
+            patch_engine::PatchEngine::validate_patch(&file_path, &patch, &existing_code);
+        let validation_passed = validation_result.is_ok();
+        let test_result = if run_tests {
+            run_repo_tests(&self.repo_root)
+        } else {
+            None
+        };
+        let tests_passed = test_result
+            .as_ref()
+            .map(|result| result.passed)
+            .unwrap_or(false);
 
         let application_mode = patch_mode.unwrap_or(engine::PatchApplicationMode::Confirm);
         let validation_cfg =
@@ -2833,8 +3005,8 @@ impl RetrievalService {
             ast_transform,
             impacted_symbols: plan.impacted_symbols.clone(),
             approved_by_user: matches!(application_mode, engine::PatchApplicationMode::AutoApply),
-            validation_passed: false,
-            tests_passed: false,
+            validation_passed,
+            tests_passed,
             rollback_occurred: false,
             rollback_reason: None,
         };
@@ -2858,6 +3030,17 @@ impl RetrievalService {
             "run_tests": run_tests,
             "max_tokens": max_tokens,
             "validation_config": validation_cfg,
+            "validation_result": {
+                "passed": validation_passed,
+                "error": validation_result.err().map(|err| err.to_string())
+            },
+            "test_result": test_result.map(|result| json!({
+                "passed": result.passed,
+                "command": result.command,
+                "exit_code": result.exit_code,
+                "stdout": truncate_chars(&result.stdout, 600),
+                "stderr": truncate_chars(&result.stderr, 600),
+            })),
             "patch_record_id": record.patch_id,
         }))
     }
@@ -4313,34 +4496,6 @@ fn module_rank_for_file(
     }
 }
 
-fn planned_context_cache_path(repo_root: &Path) -> PathBuf {
-    repo_root
-        .join(".semantic")
-        .join("planned_context_cache.json")
-}
-
-fn load_planned_context_cache(repo_root: &Path) -> HashMap<String, CachedContext> {
-    let path = planned_context_cache_path(repo_root);
-    if !path.exists() {
-        return HashMap::new();
-    }
-    let raw = match fs::read_to_string(&path) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-    serde_json::from_str::<HashMap<String, CachedContext>>(&raw).unwrap_or_default()
-}
-
-fn save_planned_context_cache(repo_root: &Path, cache: &HashMap<String, CachedContext>) {
-    let path = planned_context_cache_path(repo_root);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(serialized) = serde_json::to_string(cache) {
-        let _ = fs::write(path, serialized);
-    }
-}
-
 fn current_index_revision(repo_root: &Path) -> u64 {
     let (db_path, _) = storage::default_paths(repo_root);
     std::fs::metadata(db_path)
@@ -4365,6 +4520,175 @@ fn load_index_performance_stats(repo_root: &Path) -> serde_json::Value {
             "note": "index performance stats could not be parsed"
         })
     })
+}
+
+fn load_retrieval_policy(repo_root: &Path) -> RetrievalPolicy {
+    let path = repo_root.join(".semantic").join("retrieval_policy.toml");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return RetrievalPolicy::default();
+    };
+
+    let mut policy = RetrievalPolicy::default();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"');
+        match key {
+            "high_fanout_threshold" => assign_usize(value, &mut policy.high_fanout_threshold),
+            "low_fanout_threshold" => assign_usize(value, &mut policy.low_fanout_threshold),
+            "dense_logic_threshold" => assign_usize(value, &mut policy.dense_logic_threshold),
+            "sparse_logic_threshold" => assign_usize(value, &mut policy.sparse_logic_threshold),
+            "max_dependency_radius" => assign_usize(value, &mut policy.max_dependency_radius),
+            "max_logic_radius" => assign_usize(value, &mut policy.max_logic_radius),
+            "plan_token_cap" => assign_usize(value, &mut policy.plan_token_cap),
+            "lookup_token_cap" => assign_usize(value, &mut policy.lookup_token_cap),
+            "edit_token_cap" => assign_usize(value, &mut policy.edit_token_cap),
+            "small_repo_file_threshold" => {
+                assign_usize(value, &mut policy.small_repo_file_threshold)
+            }
+            "anti_bloat_small_task" => assign_bool(value, &mut policy.anti_bloat_small_task),
+            "p95_latency_alert_ms" => assign_u128(value, &mut policy.p95_latency_alert_ms),
+            "p99_latency_alert_ms" => assign_u128(value, &mut policy.p99_latency_alert_ms),
+            "min_cache_hit_rate_pct" => assign_f64(value, &mut policy.min_cache_hit_rate_pct),
+            "prompt_overrun_alert_pct" => assign_f64(value, &mut policy.prompt_overrun_alert_pct),
+            "step_regression_alert_pct" => assign_f64(value, &mut policy.step_regression_alert_pct),
+            _ => {}
+        }
+    }
+    policy
+}
+
+fn clamp_tokens_for_operation(repo_root: &Path, operation_kind: &str, requested: usize) -> usize {
+    let policy = load_retrieval_policy(repo_root);
+    match operation_kind {
+        "plan" => requested.min(policy.plan_token_cap),
+        "edit" => requested.min(policy.edit_token_cap),
+        _ => requested.min(policy.lookup_token_cap),
+    }
+}
+
+fn ratio_pct(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        (numerator as f64 / denominator as f64) * 100.0
+    }
+}
+
+fn build_observability_alerts(
+    op_stats: &[serde_json::Value],
+    cache_hit_rate_pct: f64,
+    policy: RetrievalPolicy,
+) -> serde_json::Value {
+    let mut alerts = Vec::new();
+    if cache_hit_rate_pct > 0.0 && cache_hit_rate_pct < policy.min_cache_hit_rate_pct {
+        alerts.push(json!({
+            "severity": "warning",
+            "kind": "cache_hit_rate",
+            "message": format!("planned-context cache hit rate {:.1}% is below threshold {:.1}%", cache_hit_rate_pct, policy.min_cache_hit_rate_pct)
+        }));
+    }
+    for op in op_stats {
+        let name = op.get("operation").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let p95 = op.get("p95_ms").and_then(|v| v.as_u64()).unwrap_or_default() as u128;
+        let p99 = op.get("p99_ms").and_then(|v| v.as_u64()).unwrap_or_default() as u128;
+        if p95 > policy.p95_latency_alert_ms {
+            alerts.push(json!({
+                "severity": "warning",
+                "kind": "latency_p95",
+                "operation": name,
+                "message": format!("p95 {}ms exceeds threshold {}ms", p95, policy.p95_latency_alert_ms)
+            }));
+        }
+        if p99 > policy.p99_latency_alert_ms {
+            alerts.push(json!({
+                "severity": "warning",
+                "kind": "latency_p99",
+                "operation": name,
+                "message": format!("p99 {}ms exceeds threshold {}ms", p99, policy.p99_latency_alert_ms)
+            }));
+        }
+    }
+    json!({
+        "thresholds": {
+            "p95_latency_alert_ms": policy.p95_latency_alert_ms,
+            "p99_latency_alert_ms": policy.p99_latency_alert_ms,
+            "min_cache_hit_rate_pct": policy.min_cache_hit_rate_pct,
+        },
+        "items": alerts
+    })
+}
+
+fn assign_usize(value: &str, out: &mut usize) {
+    if let Ok(parsed) = value.parse::<usize>() {
+        *out = parsed;
+    }
+}
+
+fn assign_u128(value: &str, out: &mut u128) {
+    if let Ok(parsed) = value.parse::<u128>() {
+        *out = parsed;
+    }
+}
+
+fn assign_f64(value: &str, out: &mut f64) {
+    if let Ok(parsed) = value.parse::<f64>() {
+        *out = parsed;
+    }
+}
+
+fn assign_bool(value: &str, out: &mut bool) {
+    if let Ok(parsed) = value.parse::<bool>() {
+        *out = parsed;
+    }
+}
+
+fn run_repo_tests(repo_root: &Path) -> Option<TestRunResult> {
+    if repo_root.join("Cargo.toml").exists() {
+        return run_command(
+            repo_root,
+            if cfg!(windows) { "cargo.exe" } else { "cargo" },
+            &["test", "--lib", "--quiet"],
+        );
+    }
+    if repo_root.join("package.json").exists() {
+        return run_command(
+            repo_root,
+            if cfg!(windows) { "npm.cmd" } else { "npm" },
+            &["test", "--", "--runInBand"],
+        );
+    }
+    None
+}
+
+fn run_command(repo_root: &Path, command: &str, args: &[&str]) -> Option<TestRunResult> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    Some(TestRunResult {
+        passed: output.status.success(),
+        command: format!("{command} {}", args.join(" ")).trim().to_string(),
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        input.to_string()
+    } else {
+        let kept: String = input.chars().take(max_chars).collect();
+        format!("{kept}...")
+    }
 }
 
 fn read_span(

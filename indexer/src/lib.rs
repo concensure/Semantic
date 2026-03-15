@@ -77,6 +77,7 @@ impl Indexer {
 
         self.rebuild_module_graph()?;
         self.storage.refresh_symbol_index()?;
+        self.storage.clear_retrieval_cache()?;
         self.perf_stats.repo_runs += 1;
         self.perf_stats.last_repo_file_count = seen.len();
         self.record_repo_elapsed(started.elapsed().as_millis());
@@ -127,6 +128,7 @@ impl Indexer {
             self.rebuild_module_graph()?;
             self.storage.refresh_symbol_index()?;
         }
+        self.storage.clear_retrieval_cache()?;
         self.record_update_elapsed(started.elapsed().as_millis());
         self.persist_perf_stats(repo_path)?;
         Ok(())
@@ -137,6 +139,7 @@ impl Indexer {
         self.storage.delete_file_metadata(relative_file)?;
         self.rebuild_module_graph()?;
         self.storage.refresh_symbol_index()?;
+        self.storage.clear_retrieval_cache()?;
         self.perf_stats.files_deleted += 1;
         Ok(())
     }

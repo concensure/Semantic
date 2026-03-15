@@ -129,6 +129,16 @@ pub struct Storage {
     pub symbol_index: TantivySymbolIndex,
 }
 
+#[derive(Debug, Clone)]
+pub struct RetrievalCacheEntry {
+    pub cache_key: String,
+    pub cache_kind: String,
+    pub value_json: Option<String>,
+    pub prompt_text: Option<String>,
+    pub cached_at_epoch_s: u64,
+    pub source_revision: u64,
+}
+
 impl Storage {
     pub fn open(db_path: &Path, tantivy_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
@@ -152,6 +162,94 @@ impl Storage {
             params![path, language, checksum, now_timestamp_string()],
         )?;
         Ok(())
+    }
+
+    pub fn upsert_retrieval_cache_entry(&self, entry: &RetrievalCacheEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO retrieval_cache(cache_key, cache_kind, value_json, prompt_text, cached_at_epoch_s, source_revision)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                cache_kind=excluded.cache_kind,
+                value_json=excluded.value_json,
+                prompt_text=excluded.prompt_text,
+                cached_at_epoch_s=excluded.cached_at_epoch_s,
+                source_revision=excluded.source_revision",
+            params![
+                entry.cache_key,
+                entry.cache_kind,
+                entry.value_json,
+                entry.prompt_text,
+                entry.cached_at_epoch_s as i64,
+                entry.source_revision as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_retrieval_cache_entry(
+        &self,
+        cache_key: &str,
+        cache_kind: &str,
+    ) -> Result<Option<RetrievalCacheEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT cache_key, cache_kind, value_json, prompt_text, cached_at_epoch_s, source_revision
+             FROM retrieval_cache
+             WHERE cache_key = ?1 AND cache_kind = ?2
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![cache_key, cache_kind])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(RetrievalCacheEntry {
+                cache_key: row.get(0)?,
+                cache_kind: row.get(1)?,
+                value_json: row.get(2)?,
+                prompt_text: row.get(3)?,
+                cached_at_epoch_s: row.get::<_, i64>(4)? as u64,
+                source_revision: row.get::<_, i64>(5)? as u64,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_retrieval_cache_entry(&self, cache_key: &str, cache_kind: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM retrieval_cache WHERE cache_key = ?1 AND cache_kind = ?2",
+            params![cache_key, cache_kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_retrieval_cache(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM retrieval_cache", [])?;
+        Ok(())
+    }
+
+    pub fn count_retrieval_cache_entries(&self, cache_kind: &str) -> Result<usize> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM retrieval_cache WHERE cache_kind = ?1")?;
+        let count = stmt.query_row(params![cache_kind], |row| row.get::<_, i64>(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn prune_retrieval_cache_kind(&self, cache_kind: &str, max_entries: usize) -> Result<usize> {
+        let count = self.count_retrieval_cache_entries(cache_kind)?;
+        if count <= max_entries {
+            return Ok(0);
+        }
+        let remove_count = count - max_entries;
+        self.conn.execute(
+            "DELETE FROM retrieval_cache
+             WHERE cache_key IN (
+               SELECT cache_key FROM retrieval_cache
+               WHERE cache_kind = ?1
+               ORDER BY cached_at_epoch_s ASC
+               LIMIT ?2
+             )",
+            params![cache_kind, remove_count as i64],
+        )?;
+        Ok(remove_count)
     }
 
     pub fn replace_file_index(
@@ -1272,7 +1370,7 @@ pub fn default_paths(base: &Path) -> (PathBuf, PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::Storage;
+    use super::{RetrievalCacheEntry, Storage};
     use engine::{DependencyRecord, LogicNodeRecord, LogicNodeType, SymbolRecord, SymbolType};
 
     #[test]
@@ -1318,6 +1416,32 @@ mod tests {
 
         let nodes = storage.get_logic_nodes(ids[0]).expect("get logic nodes");
         assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn stores_retrieval_cache_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("db.sqlite");
+        let idx = tmp.path().join("idx");
+        let storage = Storage::open(&db, &idx).expect("storage open");
+
+        storage
+            .upsert_retrieval_cache_entry(&RetrievalCacheEntry {
+                cache_key: "planned::abc".to_string(),
+                cache_kind: "planned_context".to_string(),
+                value_json: Some("{\"ok\":true}".to_string()),
+                prompt_text: None,
+                cached_at_epoch_s: 10,
+                source_revision: 20,
+            })
+            .expect("cache upsert");
+
+        let entry = storage
+            .get_retrieval_cache_entry("planned::abc", "planned_context")
+            .expect("cache get")
+            .expect("entry");
+        assert_eq!(entry.source_revision, 20);
+        assert_eq!(entry.value_json.as_deref(), Some("{\"ok\":true}"));
     }
 
     #[test]

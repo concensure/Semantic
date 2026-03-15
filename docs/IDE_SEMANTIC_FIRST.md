@@ -30,6 +30,7 @@ Default posture in this project:
 - semantic-first middleware enabled by default
 - IDE entrypoint should be `POST /ide_autoroute`
 - retrieval defaults to `reference_only=true`, with minimal raw seed attached for edit tasks
+- legacy MCP tool aliases should be treated as compatibility shims; the bridge now routes them through `retrieve` or `ide_autoroute`
 
 ## 3) Development Lifecycle Entry Points
 
@@ -85,6 +86,9 @@ What to monitor in `/ab_test_dev`:
 - `gating_metrics.empty_ref_pct`
 - `gating_metrics.semantic_prompt_over_control_pct`
 - `gating_metrics.escalation_attempt_pct`
+- `quality_gates.validated_patch_success_pct`
+- `quality_gates.tests_success_pct`
+- `quality_gates.regression_alert`
 
 Healthy signals:
 

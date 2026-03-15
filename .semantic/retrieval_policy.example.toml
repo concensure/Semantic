@@ -1,0 +1,18 @@
+high_fanout_threshold = 12
+low_fanout_threshold = 4
+dense_logic_threshold = 24
+sparse_logic_threshold = 8
+max_dependency_radius = 3
+max_logic_radius = 3
+
+plan_token_cap = 3200
+lookup_token_cap = 1800
+edit_token_cap = 4000
+small_repo_file_threshold = 50
+anti_bloat_small_task = true
+
+p95_latency_alert_ms = 60
+p99_latency_alert_ms = 120
+min_cache_hit_rate_pct = 35.0
+prompt_overrun_alert_pct = 25.0
+step_regression_alert_pct = 10.0

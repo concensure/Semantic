@@ -136,11 +136,32 @@ Primary MCP tools (2-tool surface):
 - `retrieve` — pass `operation` field (see full list above)
 - `ide_autoroute` — pass `task` for intent routing, or `action` + `action_input` for action dispatch
 
+All legacy MCP tools are callable through one of these two primary tools. Legacy names remain discoverable, but bridge routing now normalizes them onto `retrieve` or `ide_autoroute`.
+
 Available `action` values for `ide_autoroute`:
 - `debug_failure` — `action_input`: `{event_id, repository, timestamp, failure_type, stack_trace, error_message}`
 - `generate_tests` — `action_input`: `{target_symbol, framework?}`
 - `apply_tests` — `action_input`: `{repository, target_symbol, framework?}`
 - `analyze_pipeline` — `action_input`: `{failure_stage, failure_message}`
+- `llm_tools`
+- `patch_memory` — `action_input`: `{repository?, symbol?, model?, time_range?}`
+- `patch_stats` — `action_input`: `{repository?, symbol?, model?, time_range?}`
+- `model_performance` — `action_input`: `{repository?, symbol?, model?, time_range?}`
+- `organization_graph`
+- `service_graph`
+- `plan_org_refactor` — `action_input`: `{origin_repo}`
+- `org_refactor_status`
+- `refactor_status`
+- `evolution_issues` — `action_input`: `{repository?}`
+- `evolution_plans` — `action_input`: `{repository?}`
+- `generate_evolution_plan` — `action_input`: `{repository, dry_run?}`
+- `todo_seed` — `action_input`: `{tasks:[...]}`
+- `todo_tasks`
+- `ab_test_dev` — `action_input`: `{feature_request?, provider?, max_context_tokens?, single_file_fast_path?, autoroute_first?, scenario?}`
+- `ab_test_dev_results`
+- `semantic_middleware_get`
+- `semantic_middleware_set` — `action_input`: `{semantic_first_enabled}`
+- `env_check`
 
 Legacy MCP tools (backward compatible, deprecated):
 - `get_repo_map`, `get_file_outline`, `search_symbol`, `get_code_span`, `get_logic_nodes`
@@ -204,10 +225,12 @@ Why this works:
 
 Mitigations implemented:
 
-- planned-context cache with TTL for repeated query reuse
+- SQLite-backed planned-context cache with invalidation on index updates
 - default `single_file_fast_path=true` in `ide_autoroute`
 - default `reference_only=true` in `/retrieve` and `ide_autoroute`
 - adaptive retrieval breadth (`effective_breadth`) based on fanout, logic density, and token budget
+- policy-driven token caps for planning, lookup, and edit flows
+- anti-bloat mode for small single-file tasks
 - bounded response shapes (no forced expansion of extra raw files)
 
 Additional A/B hardening updates (2026-03-13):

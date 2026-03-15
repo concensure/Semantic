@@ -138,3 +138,13 @@ CREATE TABLE IF NOT EXISTS skills (
     content TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS retrieval_cache (
+    cache_key TEXT PRIMARY KEY,
+    cache_kind TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    prompt_text TEXT,
+    cached_at_epoch_s INTEGER NOT NULL,
+    source_revision INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_retrieval_cache_kind ON retrieval_cache(cache_kind);

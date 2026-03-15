@@ -471,6 +471,179 @@ async fn ide_autoroute(
                     Err(err) => Json(serde_json::json!({"ok": false, "action": "analyze_pipeline", "error": err.to_string()})),
                 }
             }
+            "llm_tools" => Json(serde_json::json!({
+                "ok": true,
+                "action": "llm_tools",
+                "result": state.retrieval.lock().get_llm_tools()
+            })),
+            "semantic_middleware_get" => {
+                let mut middleware = state.semantic_middleware.lock();
+                let now = now_epoch_s();
+                middleware
+                    .sessions
+                    .retain(|_, v| now.saturating_sub(v.last_seen_epoch_s) <= SESSION_TTL_SECS);
+                Json(serde_json::json!({
+                    "ok": true,
+                    "action": "semantic_middleware_get",
+                    "result": {
+                        "semantic_first_enabled": middleware.semantic_first_enabled,
+                        "tracked_sessions": middleware.sessions.len()
+                    }
+                }))
+            }
+            "semantic_middleware_set" => {
+                let enabled = input.get("semantic_first_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                let mut middleware = state.semantic_middleware.lock();
+                middleware.semantic_first_enabled = enabled;
+                if !enabled {
+                    middleware.sessions.clear();
+                }
+                Json(serde_json::json!({
+                    "ok": true,
+                    "action": "semantic_middleware_set",
+                    "result": {
+                        "semantic_first_enabled": middleware.semantic_first_enabled,
+                        "tracked_sessions": middleware.sessions.len()
+                    }
+                }))
+            }
+            "patch_memory" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let symbol = input.get("symbol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let model = input.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let time_range = parse_time_range(&input.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                match state.retrieval.lock().get_patch_memory(repository, symbol, model, time_range) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "patch_memory", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "patch_memory", "error": err.to_string()})),
+                }
+            }
+            "patch_stats" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let symbol = input.get("symbol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let model = input.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let time_range = parse_time_range(&input.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                match state.retrieval.lock().get_patch_stats(repository, symbol, model, time_range) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "patch_stats", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "patch_stats", "error": err.to_string()})),
+                }
+            }
+            "model_performance" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let symbol = input.get("symbol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let model = input.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let time_range = parse_time_range(&input.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                match state.retrieval.lock().get_model_performance(repository, symbol, model, time_range) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "model_performance", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "model_performance", "error": err.to_string()})),
+                }
+            }
+            "organization_graph" => match state.retrieval.lock().get_organization_graph() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "action": "organization_graph", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "action": "organization_graph", "error": err.to_string()})),
+            },
+            "service_graph" => match state.retrieval.lock().get_service_graph() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "action": "service_graph", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "action": "service_graph", "error": err.to_string()})),
+            },
+            "plan_org_refactor" => {
+                let origin_repo = input.get("origin_repo").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                match state.retrieval.lock().plan_org_refactor(&origin_repo) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "plan_org_refactor", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "plan_org_refactor", "error": err.to_string()})),
+                }
+            }
+            "org_refactor_status" => match state.retrieval.lock().get_org_refactor_status() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "action": "org_refactor_status", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "action": "org_refactor_status", "error": err.to_string()})),
+            },
+            "refactor_status" => {
+                let repo_root = state.retrieval.lock().repo_root().to_path_buf();
+                match refactor_graph::RefactorExecutor::status(&repo_root) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "refactor_status", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "refactor_status", "error": err.to_string()})),
+                }
+            }
+            "evolution_issues" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+                match state.retrieval.lock().get_evolution_issues(&repository) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "evolution_issues", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "evolution_issues", "error": err.to_string()})),
+                }
+            }
+            "evolution_plans" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+                match state.retrieval.lock().get_evolution_plans(&repository) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "evolution_plans", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "evolution_plans", "error": err.to_string()})),
+                }
+            }
+            "generate_evolution_plan" => {
+                let repository = input.get("repository").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+                let dry_run = input.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true);
+                match state.retrieval.lock().generate_evolution_plan(&repository, dry_run) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "generate_evolution_plan", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "generate_evolution_plan", "error": err.to_string()})),
+                }
+            }
+            "todo_seed" => {
+                let tasks = input.get("tasks")
+                    .and_then(|v| serde_json::from_value::<Vec<retrieval::TodoTask>>(v.clone()).ok())
+                    .unwrap_or_default();
+                match state.retrieval.lock().seed_todo_tasks(tasks) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "todo_seed", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "todo_seed", "error": err.to_string()})),
+                }
+            }
+            "todo_tasks" => match state.retrieval.lock().get_todo_tasks() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "action": "todo_tasks", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "action": "todo_tasks", "error": err.to_string()})),
+            },
+            "ab_test_dev" => {
+                let feature_request = input.get("feature_request").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let provider = input.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let max_context_tokens = input.get("max_context_tokens").and_then(|v| v.as_u64()).map(|v| v as usize);
+                let single_file_fast_path = input.get("single_file_fast_path").and_then(|v| v.as_bool()).unwrap_or(true);
+                let autoroute_first = input.get("autoroute_first").and_then(|v| v.as_bool()).unwrap_or(true);
+                let scenario = input.get("scenario").and_then(|v| v.as_str()).map(|s| s.to_string());
+                match state.retrieval.lock().run_ab_test_dev(
+                    feature_request.as_deref(),
+                    provider,
+                    max_context_tokens,
+                    single_file_fast_path,
+                    autoroute_first,
+                    scenario.as_deref(),
+                ) {
+                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "ab_test_dev", "result": result})),
+                    Err(err) => Json(serde_json::json!({"ok": false, "action": "ab_test_dev", "error": err.to_string()})),
+                }
+            }
+            "ab_test_dev_results" => match state.retrieval.lock().get_ab_tests() {
+                Ok(result) => Json(serde_json::json!({"ok": true, "action": "ab_test_dev_results", "result": result})),
+                Err(err) => Json(serde_json::json!({"ok": false, "action": "ab_test_dev_results", "error": err.to_string()})),
+            },
+            "env_check" => {
+                let repo_root = state.retrieval.lock().repo_root().to_path_buf();
+                state.retrieval.lock().load_env();
+                let env_path = repo_root.join(".semantic").join(".env");
+                let env_exists = env_path.exists();
+                let openai_set = std::env::var("OPENAI_API_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false);
+                let anthropic_set = std::env::var("ANTHROPIC_API_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false);
+                let openrouter_set = std::env::var("OPENROUTER_API_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false);
+                Json(serde_json::json!({
+                    "ok": true,
+                    "action": "env_check",
+                    "result": {
+                        "repo_root": repo_root,
+                        "env_path": env_path,
+                        "env_exists": env_exists,
+                        "env": {
+                            "OPENAI_API_KEY": openai_set,
+                            "ANTHROPIC_API_KEY": anthropic_set,
+                            "OPENROUTER_API_KEY": openrouter_set
+                        }
+                    }
+                }))
+            }
             unknown => Json(serde_json::json!({"ok": false, "error": format!("unknown action '{unknown}'")})),
         };
     }
