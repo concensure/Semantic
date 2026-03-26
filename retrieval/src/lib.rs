@@ -192,6 +192,14 @@ impl RetrievalService {
         self.telemetry.clone()
     }
 
+    /// Run a closure with a reference to the internal storage.
+    pub fn with_storage<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&storage::Storage) -> T,
+    {
+        f(&self.storage)
+    }
+
     fn migrate_legacy_planned_context_cache(&self) {
         let path = self
             .repo_root
@@ -430,6 +438,12 @@ impl RetrievalService {
             }
             // These operations are intercepted by the API layer before reaching the retrieval
             // service. They are listed here only to satisfy exhaustive pattern matching.
+            Operation::SetWorkspaceMode | Operation::GetWorkspaceMode => {
+                json!({ "note": "workspace mode is managed by the API layer, not the retrieval service" })
+            }
+            Operation::GetProjectSummary => {
+                json!({ "note": "project summary is handled by the API layer" })
+            }
             Operation::GetControlFlowHints => {
                 let symbol = request.name.or(request.query).unwrap_or_default();
                 self.get_control_flow_hints(&symbol)?
@@ -1581,7 +1595,8 @@ impl RetrievalService {
                 {"name":"performance_stats","endpoint":"/performance_stats","purpose":"Runtime hardening metrics (cache hit rate, op latency, p95)."},
                 {"name":"control_flow_hints","endpoint":"/control_flow_hints","purpose":"Control-flow hints for a symbol.","required":["symbol"]},
                 {"name":"data_flow_hints","endpoint":"/data_flow_hints","purpose":"Data-flow hints for a symbol.","required":["symbol"]},
-                {"name":"hybrid_ranked_context","endpoint":"/hybrid_ranked_context","purpose":"Hybrid ranking (symbol+logic+dependency) for compact context.","required":["query"]}
+                {"name":"hybrid_ranked_context","endpoint":"/hybrid_ranked_context","purpose":"Hybrid ranking (symbol+logic+dependency) for compact context.","required":["query"]},
+                {"name":"get_project_summary","operation":"GetProjectSummary","purpose":"Compact LLM-ready project map: file purposes, top symbols, module deps, narrative. Call at session start.","optional":["max_tokens","format"]}
             ],
             "workflow_recommendation": [
                 "Use semantic_enabled=false for pure chat or conceptual Q&A.",

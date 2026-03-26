@@ -40,6 +40,7 @@ members = [
   "test_planner",
   "pipeline_graph"
   ,"mcp_bridge"
+  ,"project_summariser"
 ]
 resolver = "2"
 

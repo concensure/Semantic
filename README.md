@@ -30,6 +30,30 @@ cargo run -p api -- ./test_repo
 
 Service binds to `$SEMANTIC_API_BASE_URL`.
 
+## Optional Project Summariser Add-On
+
+A companion crate (`project_summariser`) generates a compact, LLM-ready project map at session start — no LLM call required, built entirely from the existing index.
+
+```bash
+curl "$SEMANTIC_API_BASE_URL/project_summary?max_tokens=800&format=markdown"
+```
+
+Or via MCP `retrieve` tool:
+
+```json
+{ "operation": "GetProjectSummary", "max_tokens": 800 }
+```
+
+Or prepended automatically on `ide_autoroute` with `include_summary=true`:
+
+```json
+{ "task": "add due date to tasks", "include_summary": true }
+```
+
+Output (~400–800 tokens): per-file purpose sentence, top symbols, project narrative, module dependency sketch. JSON and markdown formats supported.
+
+See `semantic_project_summariser/PLAN.md` (sibling folder) for the full design.
+
 ## Optional Token Tracking Add-On
 
 An optional local companion in this repository can track token usage per task across `retrieve`, `ide_autoroute`, and `edit`.
@@ -55,7 +79,7 @@ Privacy defaults:
 
 The MCP bridge (`mcp_bridge`) exposes **two primary tools** that cover all use cases:
 
-- **`retrieve`** — unified retrieval. Pass `operation` to select: `GetRepoMap`, `GetFileOutline`, `SearchSymbol`, `GetCodeSpan`, `GetLogicNodes`, `GetControlFlowSlice`, `GetDataFlowSlice`, `GetLogicClusters`, `GetDependencyNeighborhood`, `GetReasoningContext`, `GetPlannedContext`, `PlanSafeEdit`, `GetControlFlowHints`, `GetDataFlowHints`, `GetHybridRankedContext`, `GetDebugGraph`, `GetPipelineGraph`, `GetRootCauseCandidates`, `GetTestGaps`, `GetDeploymentHistory`, `GetPerformanceStats`.
+- **`retrieve`** — unified retrieval. Pass `operation` to select: `GetRepoMap`, `GetFileOutline`, `SearchSymbol`, `GetCodeSpan`, `GetLogicNodes`, `GetControlFlowSlice`, `GetDataFlowSlice`, `GetLogicClusters`, `GetDependencyNeighborhood`, `GetReasoningContext`, `GetPlannedContext`, `PlanSafeEdit`, `GetControlFlowHints`, `GetDataFlowHints`, `GetHybridRankedContext`, `GetDebugGraph`, `GetPipelineGraph`, `GetRootCauseCandidates`, `GetTestGaps`, `GetDeploymentHistory`, `GetPerformanceStats`, `GetProjectSummary`.
 - **`ide_autoroute`** — intent routing (`task`) or action dispatch (`action` + `action_input`). Actions: `debug_failure`, `generate_tests`, `apply_tests`, `analyze_pipeline`.
 
 All 27 legacy named tools remain available for backward compatibility (see `GET /mcp/tools` → `legacy_tools`).
@@ -110,6 +134,7 @@ Additional retrieval operations:
 - `search_semantic_symbol`
 - `get_workspace_reasoning_context`
 - `plan_safe_edit`
+- `get_project_summary`
 
 ## Reasoning Retrieval
 

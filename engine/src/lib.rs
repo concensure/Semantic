@@ -294,11 +294,19 @@ pub struct RetrievalRequest {
     pub edit_description: Option<String>,
     pub patch_mode: Option<PatchApplicationMode>,
     pub run_tests: Option<bool>,
+    /// When Some(true), retrieval searches across all indexed workspace projects.
+    /// When None or Some(false) (default), retrieval is scoped to the primary repo root.
+    #[serde(default)]
+    pub workspace_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    /// Toggle or query workspace-wide indexing and retrieval.
+    /// Pass via ide_autoroute action="workspace_mode_set" / "workspace_mode_get".
+    SetWorkspaceMode,
+    GetWorkspaceMode,
     GetRepoMap,
     GetFileOutline,
     SearchSymbol,
@@ -331,6 +339,7 @@ pub enum Operation {
     GetTestGaps,
     GetDeploymentHistory,
     GetPerformanceStats,
+    GetProjectSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

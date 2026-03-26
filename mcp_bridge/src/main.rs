@@ -30,14 +30,6 @@ struct MCPToolResult {
     result: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
-struct MCPToolSpec {
-    name: &'static str,
-    method: &'static str,
-    endpoint: &'static str,
-    notes: Option<&'static str>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let semantic_base_url =
@@ -153,93 +145,23 @@ async fn call_tool(
 }
 
 async fn list_tools() -> Json<serde_json::Value> {
-    // Primary tools (2-tool surface)
-    let primary: Vec<MCPToolSpec> = vec![
-        MCPToolSpec {
-            name: "retrieve",
-            method: "POST",
-            endpoint: "/retrieve",
-            notes: Some(
-                "Unified retrieval tool. Pass `operation` to select behaviour: \
-                GetRepoMap | GetFileOutline | SearchSymbol | GetCodeSpan | GetLogicNodes | \
-                GetControlFlowSlice | GetDataFlowSlice | GetLogicClusters | \
-                GetDependencyNeighborhood | GetReasoningContext | GetPlannedContext | PlanSafeEdit | \
-                GetControlFlowHints (name=symbol) | GetDataFlowHints (name=symbol) | \
-                GetHybridRankedContext (query, max_tokens) | GetDebugGraph | GetPipelineGraph | \
-                GetRootCauseCandidates | GetTestGaps | GetDeploymentHistory | GetPerformanceStats. \
-                Supports single_file_fast_path, reference_only, mapping_mode, session_id.",
-            ),
+    // Exactly two primary tools. Legacy aliases are routed but not advertised
+    // to keep the tool-list token cost low (~120 tokens vs ~1400 previously).
+    let primary = serde_json::json!([
+        {
+            "name": "retrieve",
+            "method": "POST",
+            "endpoint": "/retrieve",
+            "description": "All retrieval and graph operations. Required: `operation` (string). Key operations: GetRepoMap, GetFileOutline (file), SearchSymbol (name), GetCodeSpan (file,start_line,end_line), GetPlannedContext (query,max_tokens), GetReasoningContext (name,logic_radius,dependency_radius), PlanSafeEdit (name,edit_description), GetHybridRankedContext (query), GetPerformanceStats, GetProjectSummary (max_tokens?,format?). Optional: session_id, single_file_fast_path, reference_only, mapping_mode, workspace_mode (bool)."
         },
-        MCPToolSpec {
-            name: "ide_autoroute",
-            method: "POST",
-            endpoint: "/ide_autoroute",
-            notes: Some(
-                "Semantic-first IDE entrypoint. Two modes: \
-                (1) Intent routing: pass `task` (free-text) — auto-detects intent and retrieves context. \
-                Accepts session_id, max_tokens, single_file_fast_path, reference_only, auto_minimal_raw. \
-                (2) Action dispatch: pass `action` + `action_input` — actions: \
-                debug_failure (event_id, repository, timestamp, failure_type, stack_trace, error_message) | \
-                generate_tests (target_symbol, framework?) | \
-                apply_tests (repository, target_symbol, framework?) | \
-                analyze_pipeline (failure_stage, failure_message) | llm_tools | patch_memory | \
-                patch_stats | model_performance | organization_graph | service_graph | \
-                plan_org_refactor | org_refactor_status | refactor_status | evolution_issues | \
-                evolution_plans | generate_evolution_plan | todo_seed | todo_tasks | ab_test_dev | \
-                ab_test_dev_results | semantic_middleware_get | semantic_middleware_set | env_check.",
-            ),
-        },
-    ];
-
-    // Legacy aliases kept for backward compatibility
-    let legacy: Vec<MCPToolSpec> = vec![
-        MCPToolSpec { name: "semantic_first", method: "POST", endpoint: "/ide_autoroute", notes: Some("legacy alias of ide_autoroute") },
-        MCPToolSpec { name: "debug_failure", method: "POST", endpoint: "/debug_failure", notes: Some("legacy — use ide_autoroute with action=debug_failure") },
-        MCPToolSpec { name: "debug_graph", method: "GET", endpoint: "/debug_graph", notes: Some("legacy — use retrieve with operation=GetDebugGraph") },
-        MCPToolSpec { name: "root_cause_candidates", method: "GET", endpoint: "/root_cause_candidates", notes: Some("legacy — use retrieve with operation=GetRootCauseCandidates") },
-        MCPToolSpec { name: "test_gaps", method: "GET", endpoint: "/test_gaps", notes: Some("legacy — use retrieve with operation=GetTestGaps") },
-        MCPToolSpec { name: "generate_tests", method: "POST", endpoint: "/generate_tests", notes: Some("legacy — use ide_autoroute with action=generate_tests") },
-        MCPToolSpec { name: "apply_tests", method: "POST", endpoint: "/apply_tests", notes: Some("legacy — use ide_autoroute with action=apply_tests") },
-        MCPToolSpec { name: "pipeline_graph", method: "GET", endpoint: "/pipeline_graph", notes: Some("legacy — use retrieve with operation=GetPipelineGraph") },
-        MCPToolSpec { name: "analyze_pipeline", method: "POST", endpoint: "/analyze_pipeline", notes: Some("legacy — use ide_autoroute with action=analyze_pipeline") },
-        MCPToolSpec { name: "deployment_history", method: "GET", endpoint: "/deployment_history", notes: Some("legacy — use retrieve with operation=GetDeploymentHistory") },
-        MCPToolSpec { name: "performance_stats", method: "GET", endpoint: "/performance_stats", notes: Some("legacy — use retrieve with operation=GetPerformanceStats") },
-        MCPToolSpec { name: "control_flow_hints", method: "GET", endpoint: "/control_flow_hints", notes: Some("legacy — use retrieve with operation=GetControlFlowHints and name=symbol") },
-        MCPToolSpec { name: "data_flow_hints", method: "GET", endpoint: "/data_flow_hints", notes: Some("legacy — use retrieve with operation=GetDataFlowHints and name=symbol") },
-        MCPToolSpec { name: "hybrid_ranked_context", method: "POST", endpoint: "/hybrid_ranked_context", notes: Some("legacy — use retrieve with operation=GetHybridRankedContext") },
-        MCPToolSpec { name: "ab_test_dev", method: "POST", endpoint: "/ab_test_dev", notes: Some("accepts single_file_fast_path=true|false") },
-        MCPToolSpec { name: "ab_test_dev_results", method: "GET", endpoint: "/ab_test_dev", notes: None },
-        MCPToolSpec { name: "llm_tools", method: "GET", endpoint: "/llm_tools", notes: None },
-        MCPToolSpec { name: "patch_memory", method: "GET", endpoint: "/patch_memory", notes: Some("legacy — use ide_autoroute with action=patch_memory") },
-        MCPToolSpec { name: "patch_stats", method: "GET", endpoint: "/patch_stats", notes: Some("legacy — use ide_autoroute with action=patch_stats") },
-        MCPToolSpec { name: "model_performance", method: "GET", endpoint: "/model_performance", notes: Some("legacy — use ide_autoroute with action=model_performance") },
-        MCPToolSpec { name: "organization_graph", method: "GET", endpoint: "/organization_graph", notes: Some("legacy — use ide_autoroute with action=organization_graph") },
-        MCPToolSpec { name: "service_graph", method: "GET", endpoint: "/service_graph", notes: Some("legacy — use ide_autoroute with action=service_graph") },
-        MCPToolSpec { name: "plan_org_refactor", method: "POST", endpoint: "/plan_org_refactor", notes: Some("legacy — use ide_autoroute with action=plan_org_refactor") },
-        MCPToolSpec { name: "org_refactor_status", method: "GET", endpoint: "/org_refactor_status", notes: Some("legacy — use ide_autoroute with action=org_refactor_status") },
-        MCPToolSpec { name: "refactor_status", method: "GET", endpoint: "/refactor_status", notes: Some("legacy — use ide_autoroute with action=refactor_status") },
-        MCPToolSpec { name: "evolution_issues", method: "GET", endpoint: "/evolution_issues", notes: Some("legacy — use ide_autoroute with action=evolution_issues") },
-        MCPToolSpec { name: "evolution_plans", method: "GET", endpoint: "/evolution_plans", notes: Some("legacy — use ide_autoroute with action=evolution_plans") },
-        MCPToolSpec { name: "generate_evolution_plan", method: "POST", endpoint: "/generate_evolution_plan", notes: Some("legacy — use ide_autoroute with action=generate_evolution_plan") },
-        MCPToolSpec { name: "todo_seed", method: "POST", endpoint: "/todo/seed", notes: Some("legacy — use ide_autoroute with action=todo_seed") },
-        MCPToolSpec { name: "todo_tasks", method: "GET", endpoint: "/todo/tasks", notes: Some("legacy — use ide_autoroute with action=todo_tasks") },
-        MCPToolSpec { name: "semantic_middleware", method: "GET", endpoint: "/semantic_middleware", notes: Some("legacy — use ide_autoroute with action=semantic_middleware_get") },
-        MCPToolSpec { name: "env_check", method: "GET", endpoint: "/env_check", notes: Some("legacy — use ide_autoroute with action=env_check") },
-        MCPToolSpec { name: "get_repo_map", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetRepoMap") },
-        MCPToolSpec { name: "get_file_outline", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetFileOutline") },
-        MCPToolSpec { name: "search_symbol", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=SearchSymbol") },
-        MCPToolSpec { name: "get_code_span", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetCodeSpan") },
-        MCPToolSpec { name: "get_logic_nodes", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetLogicNodes") },
-        MCPToolSpec { name: "get_control_flow_slice", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetControlFlowSlice") },
-        MCPToolSpec { name: "get_data_flow_slice", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetDataFlowSlice") },
-        MCPToolSpec { name: "get_logic_clusters", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetLogicClusters") },
-        MCPToolSpec { name: "get_dependency_neighborhood", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetDependencyNeighborhood") },
-        MCPToolSpec { name: "get_reasoning_context", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetReasoningContext") },
-        MCPToolSpec { name: "get_planned_context", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=GetPlannedContext") },
-        MCPToolSpec { name: "plan_safe_edit", method: "POST", endpoint: "/retrieve", notes: Some("legacy — use retrieve with operation=PlanSafeEdit") },
-    ];
-
-    Json(serde_json::json!({"ok": true, "tools": primary, "legacy_tools": legacy}))
+        {
+            "name": "ide_autoroute",
+            "method": "POST",
+            "endpoint": "/ide_autoroute",
+            "description": "Two modes. (1) Intent: pass `task` string — auto-retrieves context. Optional: session_id, max_tokens, single_file_fast_path, reference_only. (2) Action: pass `action` + `action_input`. Actions: debug_failure, generate_tests, apply_tests, analyze_pipeline, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, generate_evolution_plan, organization_graph, service_graph, plan_org_refactor, semantic_middleware_get, semantic_middleware_set, workspace_mode_get, workspace_mode_set (enabled:bool), env_check, ab_test_dev, llm_tools."
+        }
+    ]);
+    Json(serde_json::json!({"ok": true, "tools": primary}))
 }
 
 fn resolve_tool_request(
@@ -338,6 +260,7 @@ fn map_retrieve_operation(name: &str) -> Option<&'static str> {
         "get_test_gaps" => Some("GetTestGaps"),
         "get_deployment_history" => Some("GetDeploymentHistory"),
         "get_performance_stats" => Some("GetPerformanceStats"),
+        "get_project_summary" => Some("GetProjectSummary"),
         _ => None,
     }
 }
@@ -366,6 +289,8 @@ fn map_ide_action(name: &str) -> Option<&'static str> {
         "ab_test_dev_results" => Some("ab_test_dev_results"),
         "semantic_middleware" => Some("semantic_middleware_get"),
         "env_check" => Some("env_check"),
+        "workspace_mode_get" => Some("workspace_mode_get"),
+        "workspace_mode_set" => Some("workspace_mode_set"),
         _ => None,
     }
 }

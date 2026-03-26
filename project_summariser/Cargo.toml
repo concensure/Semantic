@@ -1,0 +1,12 @@
+[package]
+name = "project_summariser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+storage = { path = "../storage" }
+engine = { path = "../engine" }

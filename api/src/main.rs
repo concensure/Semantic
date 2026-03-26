@@ -25,6 +25,57 @@ use watcher::RepoWatcher;
 struct AppState {
     retrieval: Arc<Mutex<RetrievalService>>,
     semantic_middleware: Arc<Mutex<SemanticMiddlewareState>>,
+    workspace_state: Arc<Mutex<WorkspaceState>>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceState {
+    /// When true the indexer has indexed all workspace roots and retrieval
+    /// searches across all of them. When false only the primary repo root
+    /// is indexed and searched.
+    workspace_mode_enabled: bool,
+    /// Absolute paths of all workspace project roots (excluding primary).
+    workspace_roots: Vec<std::path::PathBuf>,
+    primary_root: std::path::PathBuf,
+}
+
+impl WorkspaceState {
+    /// Read workspace roots from `.semantic/workspace.toml` in the primary root.
+    /// Format (one path per line under [roots]):
+    ///   [roots]
+    ///   paths = [
+    ///     "../Agenton",
+    ///     "../CLAIR lazy skill loading",
+    ///   ]
+    fn load(primary_root: &std::path::Path) -> Self {
+        let config_path = primary_root.join(".semantic").join("workspace.toml");
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(raw) = std::fs::read_to_string(&config_path) {
+            let mut in_paths = false;
+            for line in raw.lines() {
+                let t = line.trim();
+                if t == "paths = [" || t == "paths=[" { in_paths = true; continue; }
+                if in_paths {
+                    if t == "]" { break; }
+                    let p = t.trim_matches(',').trim().trim_matches('"');
+                    if p.is_empty() { continue; }
+                    let resolved = if std::path::Path::new(p).is_absolute() {
+                        std::path::PathBuf::from(p)
+                    } else {
+                        primary_root.join(p)
+                    };
+                    if let Ok(canonical) = resolved.canonicalize() {
+                        roots.push(canonical);
+                    }
+                }
+            }
+        }
+        Self {
+            workspace_mode_enabled: false,
+            workspace_roots: roots,
+            primary_root: primary_root.to_path_buf(),
+        }
+    }
 }
 
 struct SemanticMiddlewareState {
@@ -74,11 +125,14 @@ async fn main() -> Result<()> {
     let retrieval_service = Arc::new(Mutex::new(RetrievalService::new(repo_root.clone(), retrieval_storage)));
 
     let shared_indexer = Arc::new(Mutex::new(indexer));
-    let _watcher = RepoWatcher::start(repo_root, shared_indexer)?;
+    let _watcher = RepoWatcher::start(repo_root.clone(), shared_indexer)?;
+
+    let workspace_state = WorkspaceState::load(&repo_root);
 
     let state = AppState {
         retrieval: retrieval_service,
         semantic_middleware: Arc::new(Mutex::new(SemanticMiddlewareState::default())),
+        workspace_state: Arc::new(Mutex::new(workspace_state)),
     };
 
     let app = Router::new()
@@ -121,6 +175,7 @@ async fn main() -> Result<()> {
         .route("/env_check", get(get_env_check))
         .route("/mcp_settings_ui", get(get_mcp_settings_ui))
         .route("/mcp_settings_update", post(update_mcp_settings))
+        .route("/project_summary", get(get_project_summary))
         .with_state(state);
 
     let addr: SocketAddr = "127.0.0.1:4317".parse()?;
@@ -347,6 +402,22 @@ async fn retrieve(
                     "result": state.retrieval.lock().get_performance_stats()
                 }));
             }
+            Operation::GetProjectSummary => {
+                let max_tokens = body.request.max_tokens.unwrap_or(800);
+                let result = state.retrieval.lock().with_storage(|storage| {
+                    project_summariser::ProjectSummariser::new(storage).build(max_tokens)
+                });
+                return Json(match result {
+                    Ok(doc) => serde_json::json!({
+                        "ok": true,
+                        "operation": "get_project_summary",
+                        "token_estimate": doc.token_estimate,
+                        "summary": doc.to_json(),
+                        "summary_text": doc.summary_text,
+                    }),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
             _ => {}
         }
 
@@ -478,6 +549,7 @@ struct IdeAutoRouteRequest {
     max_footprint_items: Option<usize>,
     reuse_session_context: Option<bool>,
     auto_minimal_raw: Option<bool>,
+    include_summary: Option<bool>,
 }
 
 async fn ide_autoroute(
@@ -724,6 +796,101 @@ async fn ide_autoroute(
                     }
                 }))
             }
+            "workspace_mode_get" => {
+                let ws = state.workspace_state.lock();
+                Json(serde_json::json!({
+                    "ok": true,
+                    "action": "workspace_mode_get",
+                    "result": {
+                        "workspace_mode_enabled": ws.workspace_mode_enabled,
+                        "workspace_roots": ws.workspace_roots,
+                        "primary_root": ws.primary_root,
+                        "note": "Toggle with action=workspace_mode_set, action_input={\"enabled\": true|false}"
+                    }
+                }))
+            }
+            "workspace_mode_set" => {
+                let enabled = input.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                let mut ws = state.workspace_state.lock();
+                let changed = ws.workspace_mode_enabled != enabled;
+                ws.workspace_mode_enabled = enabled;
+                let roots = ws.workspace_roots.clone();
+                let primary = ws.primary_root.clone();
+                drop(ws);
+                if changed && enabled {
+                    // Re-index all workspace roots in a background thread so the
+                    // HTTP response returns immediately.
+                    let retrieval = state.retrieval.clone();
+                    let roots_for_closure = roots.clone();
+                    let primary_for_closure = primary.clone();
+                    let index_storage = {
+                        let (db_path, tantivy_path) = storage::default_paths(&primary);
+                        storage::Storage::open(&db_path, &tantivy_path)
+                    };
+                    match index_storage {
+                        Ok(index_storage) => {
+                            tokio::task::spawn_blocking(move || {
+                                let mut indexer = indexer::Indexer::new(index_storage);
+                                if let Err(e) = indexer.index_workspace(&primary_for_closure, &roots_for_closure) {
+                                    tracing::error!("workspace index failed: {e}");
+                                } else {
+                                    tracing::info!("workspace index complete: {} extra roots", roots_for_closure.len());
+                                }
+                                // Invalidate retrieval cache after re-index.
+                                let _ = retrieval.lock().index_revision();
+                            });
+                        }
+                        Err(e) => {
+                            return Json(serde_json::json!({
+                                "ok": false,
+                                "action": "workspace_mode_set",
+                                "error": format!("failed to open storage for workspace index: {e}")
+                            }));
+                        }
+                    }
+                } else if changed && !enabled {
+                    // Re-index only the primary root to remove workspace files.
+                    let retrieval = state.retrieval.clone();
+                    let index_storage = {
+                        let (db_path, tantivy_path) = storage::default_paths(&primary);
+                        storage::Storage::open(&db_path, &tantivy_path)
+                    };
+                    match index_storage {
+                        Ok(index_storage) => {
+                            tokio::task::spawn_blocking(move || {
+                                let mut indexer = indexer::Indexer::new(index_storage);
+                                if let Err(e) = indexer.index_repo(&primary) {
+                                    tracing::error!("primary re-index failed: {e}");
+                                } else {
+                                    tracing::info!("reverted to primary-only index");
+                                }
+                                let _ = retrieval.lock().index_revision();
+                            });
+                        }
+                        Err(e) => {
+                            return Json(serde_json::json!({
+                                "ok": false,
+                                "action": "workspace_mode_set",
+                                "error": format!("failed to open storage for primary re-index: {e}")
+                            }));
+                        }
+                    }
+                }
+                Json(serde_json::json!({
+                    "ok": true,
+                    "action": "workspace_mode_set",
+                    "result": {
+                        "workspace_mode_enabled": enabled,
+                        "indexing_triggered": changed,
+                        "workspace_roots": roots,
+                        "note": if enabled {
+                            "Workspace indexing started in background. Retrieval will cover all projects once complete."
+                        } else {
+                            "Reverted to primary-root-only indexing. Re-index started in background."
+                        }
+                    }
+                }))
+            }
             unknown => Json(serde_json::json!({"ok": false, "error": format!("unknown action '{unknown}'")})),
         };
     }
@@ -736,6 +903,7 @@ async fn ide_autoroute(
     let mapping_mode = body.mapping_mode.clone();
     let max_footprint_items = body.max_footprint_items;
     let reuse_session_context = body.reuse_session_context.unwrap_or(true);
+    let include_summary = body.include_summary.unwrap_or(false);
     let auto_minimal_raw = body.auto_minimal_raw.unwrap_or(true);
 
     let planned_request = RetrievalRequest {
@@ -755,6 +923,7 @@ async fn ide_autoroute(
         edit_description: None,
         patch_mode: None,
         run_tests: None,
+        workspace_mode: None,
     };
 
     let planned = state
@@ -788,6 +957,7 @@ async fn ide_autoroute(
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                workspace_mode: None,
             };
             match state.retrieval.lock().handle(fallback) {
                 Ok(r) => ("search_semantic_symbol", r.result),
@@ -851,7 +1021,20 @@ async fn ide_autoroute(
         "mapping_mode": mapping_mode.unwrap_or_else(|| "footprint_first".to_string()),
         "reuse_session_context": reuse_session_context,
         "reused_context_count": reused_context_count,
-        "result": result
+        "result": result,
+        "project_summary": if include_summary {
+            state.retrieval.lock().with_storage(|storage| {
+                project_summariser::ProjectSummariser::new(storage)
+                    .build(800)
+                    .ok()
+                    .map(|doc| serde_json::json!({
+                        "summary_text": doc.summary_text,
+                        "token_estimate": doc.token_estimate,
+                    }))
+            })
+        } else {
+            None
+        }
     }))
     });
     emit_task_finished(&telemetry, &scope, "tool_routing", &response.0);
@@ -898,6 +1081,7 @@ fn build_minimal_raw_seed(
         edit_description: None,
         patch_mode: None,
         run_tests: None,
+        workspace_mode: None,
     };
     let result = state.retrieval.lock().handle(req).ok()?;
     Some(serde_json::json!({
@@ -937,6 +1121,7 @@ fn build_low_confidence_raw_context(
             edit_description: None,
             patch_mode: None,
             run_tests: None,
+            workspace_mode: None,
         };
         let res = state.retrieval.lock().handle(req).ok()?;
         out.push(serde_json::json!({
@@ -1156,6 +1341,7 @@ async fn edit(
             edit_description: Some(body.edit),
             patch_mode: body.patch_mode,
             run_tests: body.run_tests,
+            workspace_mode: None,
         };
         let result = state.retrieval.lock().handle(request);
         match result {
@@ -1656,6 +1842,43 @@ fn html_escape(input: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProjectSummaryQuery {
+    max_tokens: Option<usize>,
+    format: Option<String>,
+}
+
+async fn get_project_summary(
+    State(state): State<AppState>,
+    Query(query): Query<ProjectSummaryQuery>,
+) -> Json<serde_json::Value> {
+    let max_tokens = query.max_tokens.unwrap_or(800);
+    let result = state.retrieval.lock().with_storage(|storage| {
+        project_summariser::ProjectSummariser::new(storage).build(max_tokens)
+    });
+    match result {
+        Ok(doc) => {
+            let telemetry = state.retrieval.lock().telemetry();
+            let mut event = telemetry.event(None, "project_summary_built", "api", Some("planning"));
+            event.metadata = telemetry.sanitize_metadata(serde_json::json!({
+                "token_estimate": doc.token_estimate,
+                "file_count": doc.file_count,
+                "module_count": doc.module_count,
+                "cache_hit": false,
+            }));
+            telemetry.emit(event);
+            let want_markdown = query.format.as_deref() == Some("markdown");
+            Json(serde_json::json!({
+                "ok": true,
+                "token_estimate": doc.token_estimate,
+                "summary": doc.to_json(),
+                "summary_text": if want_markdown { doc.summary_text } else { String::new() },
+            }))
+        }
+        Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
+    }
 }
 
 fn success(response: RetrievalResponse) -> serde_json::Value {

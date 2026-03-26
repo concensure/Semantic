@@ -45,6 +45,107 @@ impl Indexer {
         self.repo_id = repo_id;
     }
 
+    /// Index every project listed in `workspace_roots` into the shared DB.
+    /// Each file is stored with a `<project_name>/` prefix so paths are
+    /// namespaced and do not collide across projects.
+    pub fn index_workspace(&mut self, primary_root: &Path, workspace_roots: &[std::path::PathBuf]) -> Result<()> {
+        // Always index the primary root first (no prefix — preserves existing behaviour).
+        self.index_repo(primary_root)?;
+        for root in workspace_roots {
+            if root == primary_root {
+                continue;
+            }
+            let project_name = root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            self.index_repo_with_prefix(root, &project_name)?;
+        }
+        Ok(())
+    }
+
+    /// Index a repo root, prefixing every stored file path with `<prefix>/`.
+    pub fn index_repo_with_prefix(&mut self, repo_path: &Path, prefix: &str) -> Result<()> {
+        let started = Instant::now();
+        let mut seen = HashSet::new();
+
+        for entry in WalkDir::new(repo_path).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let full_path = entry.path();
+            let rel_raw = match full_path.strip_prefix(repo_path) {
+                Ok(p) => p.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            if SupportedLanguage::from_path(&rel_raw).is_none() {
+                continue;
+            }
+            let rel = format!("{prefix}/{rel_raw}");
+            seen.insert(rel.clone());
+            // Read the actual file but store under the prefixed path.
+            let content = match fs::read_to_string(full_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let checksum = checksum(&content);
+            if let Some(existing) = self.storage.get_file_checksum(&rel)? {
+                if existing == checksum {
+                    self.perf_stats.files_skipped += 1;
+                    continue;
+                }
+            }
+            let parsed = match self.parser.parse(&rel_raw, &content) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // Re-prefix symbol file references.
+            let prefixed_symbols: Vec<engine::SymbolRecord> = parsed.symbols.iter().map(|s| {
+                let mut s2 = s.clone();
+                s2.file = format!("{prefix}/{}", s2.file);
+                s2
+            }).collect();
+            let prefixed_deps: Vec<engine::DependencyRecord> = parsed.dependencies.iter().map(|d| {
+                let mut d2 = d.clone();
+                d2.file = format!("{prefix}/{}", d2.file);
+                d2
+            }).collect();
+            self.storage.replace_file_index(
+                self.repo_id,
+                &rel,
+                &parsed.language,
+                &checksum,
+                &prefixed_symbols,
+                &prefixed_deps,
+                &parsed.logic_nodes,
+                &parsed.control_flow_edges,
+                &parsed.data_flow_edges,
+                &parsed.logic_clusters,
+            )?;
+            self.perf_stats.files_indexed += 1;
+        }
+
+        // Remove stale prefixed files.
+        let prefix_slash = format!("{prefix}/");
+        for existing in self.storage.list_files()? {
+            if existing.starts_with(&prefix_slash) && !seen.contains(&existing) {
+                self.storage.delete_file_records(&existing)?;
+                self.storage.delete_file_metadata(&existing)?;
+                self.perf_stats.files_deleted += 1;
+            }
+        }
+
+        self.rebuild_module_graph()?;
+        self.storage.refresh_symbol_index()?;
+        self.storage.clear_retrieval_cache()?;
+        self.perf_stats.repo_runs += 1;
+        self.perf_stats.last_repo_file_count = seen.len();
+        self.record_repo_elapsed(started.elapsed().as_millis());
+        self.persist_perf_stats(repo_path)?;
+        Ok(())
+    }
+
     pub fn index_repo(&mut self, repo_path: &Path) -> Result<()> {
         let started = Instant::now();
         let mut seen = HashSet::new();
