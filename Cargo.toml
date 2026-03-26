@@ -41,6 +41,7 @@ members = [
   "pipeline_graph"
   ,"mcp_bridge"
   ,"project_summariser"
+  ,"error_log"
 ]
 resolver = "2"
 

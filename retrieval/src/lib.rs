@@ -444,6 +444,25 @@ impl RetrievalService {
             Operation::GetProjectSummary => {
                 json!({ "note": "project summary is handled by the API layer" })
             }
+            Operation::GetErrorContext => {
+                let kind = request.error_kind.as_deref().unwrap_or("");
+                let msg = request.error_message.as_deref().unwrap_or("");
+                self.get_error_context(kind, msg)?
+            }
+            Operation::RecordError => {
+                let kind = request.error_kind.as_deref().unwrap_or("");
+                let msg = request.error_message.as_deref().unwrap_or("");
+                let file_hint = request.file.as_deref();
+                let symbol_hint = request.name.as_deref();
+                self.record_error(kind, msg, file_hint, symbol_hint)?
+            }
+            Operation::RecordSolution => {
+                let pattern_id = request.pattern_id.unwrap_or(0);
+                let solution = request.solution.as_deref().unwrap_or("");
+                let outcome = request.outcome.as_deref().unwrap_or("resolved");
+                let token_cost = request.token_cost.unwrap_or(0);
+                self.record_solution(pattern_id, solution, outcome, token_cost)?
+            }
             Operation::GetControlFlowHints => {
                 let symbol = request.name.or(request.query).unwrap_or_default();
                 self.get_control_flow_hints(&symbol)?
@@ -1559,6 +1578,53 @@ impl RetrievalService {
             },
             "task_results": task_results,
         }))
+    }
+
+    pub fn get_error_context(&self, error_kind: &str, message: &str) -> Result<serde_json::Value> {
+        let logger = error_log::ErrorLogger::new(&self.storage, &self.repo_root);
+        let _ = logger.migrate();
+        match logger.build_hint_block(error_kind, message)? {
+            Some(hint) => Ok(hint),
+            None => Ok(json!({ "error_log": null, "note": "no prior matches" })),
+        }
+    }
+
+    pub fn record_error(
+        &self,
+        error_kind: &str,
+        message: &str,
+        file_hint: Option<&str>,
+        symbol_hint: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let logger = error_log::ErrorLogger::new(&self.storage, &self.repo_root);
+        let _ = logger.migrate();
+        let id = logger.record_error(error_kind, message, file_hint, symbol_hint)?;
+        Ok(json!({ "pattern_id": id }))
+    }
+
+    pub fn record_solution(
+        &self,
+        pattern_id: i64,
+        solution: &str,
+        outcome: &str,
+        token_cost: i64,
+    ) -> Result<serde_json::Value> {
+        let logger = error_log::ErrorLogger::new(&self.storage, &self.repo_root);
+        let _ = logger.migrate();
+        let id = logger.record_solution(pattern_id, solution, outcome, token_cost)?;
+        // emit telemetry event if token_tracking is enabled
+        if outcome == "resolved" {
+            emit_current(|sink, scope| {
+                let mut event = sink.event(Some(scope), "error_resolved", "error_log", Some("debug"));
+                event.metadata = sink.sanitize_metadata(serde_json::json!({
+                    "pattern_id": pattern_id,
+                    "token_cost": token_cost,
+                }));
+                event.status = Some("ok".to_string());
+                event
+            });
+        }
+        Ok(json!({ "solution_id": id }))
     }
 
     pub fn get_llm_tools(&self) -> serde_json::Value {

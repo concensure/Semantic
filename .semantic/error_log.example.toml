@@ -1,0 +1,17 @@
+# Error Log Add-On Configuration
+# Copy this file to .semantic/error_log.toml and set enabled = true to activate.
+
+[error_log]
+enabled = true
+
+# Privacy tier: strict | balanced | debug
+# strict   — metrics only, hashed file paths, no raw message bodies
+# balanced — normalized messages + relative file paths
+# debug    — full messages and paths (local dev only)
+privacy = "balanced"
+
+# Maximum number of error patterns to retain (oldest pruned first)
+max_patterns = 500
+
+# Automatically inject prior error context into debug_failure autoroute responses
+auto_inject = true

@@ -585,6 +585,15 @@ async fn ide_autoroute(
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
                     .unwrap_or_default();
                 let error_message = input.get("error_message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                // Inject prior error context before running debug analysis
+                let error_hint = {
+                    let repo_root = state.retrieval.lock().repo_root().to_path_buf();
+                    state.retrieval.lock().with_storage(|storage| {
+                        let logger = error_log::ErrorLogger::new(storage, &repo_root);
+                        let _ = logger.migrate();
+                        logger.build_hint_block(&failure_type, &error_message).ok().flatten()
+                    })
+                };
                 let event = debug_graph::FailureEvent {
                     event_id,
                     repository,
@@ -594,7 +603,14 @@ async fn ide_autoroute(
                     error_message,
                 };
                 match state.retrieval.lock().debug_failure(event) {
-                    Ok(result) => Json(serde_json::json!({"ok": true, "action": "debug_failure", "result": result})),
+                    Ok(mut result) => {
+                        if let Some(hint) = error_hint {
+                            if let Some(obj) = result.as_object_mut() {
+                                obj.insert("prior_error_context".to_string(), hint);
+                            }
+                        }
+                        Json(serde_json::json!({"ok": true, "action": "debug_failure", "result": result}))
+                    }
                     Err(err) => Json(serde_json::json!({"ok": false, "action": "debug_failure", "error": err.to_string()})),
                 }
             }
@@ -924,7 +940,7 @@ async fn ide_autoroute(
         edit_description: None,
         patch_mode: None,
         run_tests: None,
-        workspace_mode: None,
+        workspace_mode: None, ..Default::default()
     };
 
     let planned = state
@@ -958,7 +974,7 @@ async fn ide_autoroute(
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
-                workspace_mode: None,
+                workspace_mode: None, ..Default::default()
             };
             match state.retrieval.lock().handle(fallback) {
                 Ok(r) => ("search_semantic_symbol", r.result),
@@ -1082,7 +1098,7 @@ fn build_minimal_raw_seed(
         edit_description: None,
         patch_mode: None,
         run_tests: None,
-        workspace_mode: None,
+        workspace_mode: None, ..Default::default()
     };
     let result = state.retrieval.lock().handle(req).ok()?;
     Some(serde_json::json!({
@@ -1122,7 +1138,7 @@ fn build_low_confidence_raw_context(
             edit_description: None,
             patch_mode: None,
             run_tests: None,
-            workspace_mode: None,
+            workspace_mode: None, ..Default::default()
         };
         let res = state.retrieval.lock().handle(req).ok()?;
         out.push(serde_json::json!({
@@ -1342,7 +1358,7 @@ async fn edit(
             edit_description: Some(body.edit),
             patch_mode: body.patch_mode,
             run_tests: body.run_tests,
-            workspace_mode: None,
+            workspace_mode: None, ..Default::default()
         };
         let result = state.retrieval.lock().handle(request);
         match result {

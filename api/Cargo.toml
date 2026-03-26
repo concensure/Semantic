@@ -14,6 +14,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 parking_lot.workspace = true
 engine = { path = "../engine" }
+error_log = { path = "../error_log" }
 indexer = { path = "../indexer" }
 retrieval = { path = "../retrieval" }
 storage = { path = "../storage" }

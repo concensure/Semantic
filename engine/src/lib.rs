@@ -276,7 +276,7 @@ pub struct ParsedFile {
     pub logic_clusters: Vec<LogicClusterRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RetrievalRequest {
     pub operation: Operation,
     pub name: Option<String>,
@@ -298,15 +298,29 @@ pub struct RetrievalRequest {
     /// When None or Some(false) (default), retrieval is scoped to the primary repo root.
     #[serde(default)]
     pub workspace_mode: Option<bool>,
+    // error_log fields
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub pattern_id: Option<i64>,
+    #[serde(default)]
+    pub solution: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub token_cost: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     /// Toggle or query workspace-wide indexing and retrieval.
     /// Pass via ide_autoroute action="workspace_mode_set" / "workspace_mode_get".
     SetWorkspaceMode,
     GetWorkspaceMode,
+    #[default]
     GetRepoMap,
     GetFileOutline,
     SearchSymbol,
@@ -340,10 +354,36 @@ pub enum Operation {
     GetDeploymentHistory,
     GetPerformanceStats,
     GetProjectSummary,
+    GetErrorContext,
+    RecordError,
+    RecordSolution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalResponse {
     pub operation: Operation,
     pub result: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorPattern {
+    pub id: i64,
+    pub error_hash: String,
+    pub error_kind: String,
+    pub message: String,
+    pub file_hint: String,
+    pub symbol_hint: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub hit_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorSolution {
+    pub id: i64,
+    pub pattern_id: i64,
+    pub solution: String,
+    pub outcome: String,
+    pub applied_at: u64,
+    pub token_cost: i64,
 }

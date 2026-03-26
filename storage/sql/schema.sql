@@ -148,3 +148,27 @@ CREATE TABLE IF NOT EXISTS retrieval_cache (
     source_revision INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_cache_kind ON retrieval_cache(cache_kind);
+
+CREATE TABLE IF NOT EXISTS error_patterns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_hash  TEXT UNIQUE NOT NULL,
+    error_kind  TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    file_hint   TEXT NOT NULL DEFAULT '',
+    symbol_hint TEXT NOT NULL DEFAULT '',
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    hit_count   INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_error_kind ON error_patterns(error_kind);
+CREATE INDEX IF NOT EXISTS idx_error_hash ON error_patterns(error_hash);
+
+CREATE TABLE IF NOT EXISTS error_solutions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern_id  INTEGER NOT NULL REFERENCES error_patterns(id),
+    solution    TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    applied_at  INTEGER NOT NULL,
+    token_cost  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_solution_pattern ON error_solutions(pattern_id);

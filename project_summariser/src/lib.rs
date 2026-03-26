@@ -3,10 +3,6 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Builds a compact, LLM-ready project map from the existing index.
-/// No LLM call required — rule-based from storage.
-/// Results are cached in SQLite under cache_kind = "project_summary" with
-/// revision-based invalidation identical to planned_context.
 pub struct ProjectSummariser<'a> {
     storage: &'a storage::Storage,
 }
@@ -16,16 +12,41 @@ impl<'a> ProjectSummariser<'a> {
         Self { storage }
     }
 
-    /// Build the full summary document. Checks cache first; rebuilds on index
-    /// revision change or TTL expiry (3600 s).
     pub fn build(&self, max_tokens: usize) -> Result<SummaryDocument> {
+        self.build_with_options(max_tokens, false)
+    }
+
+    /// Build with optional recurring-issues note appended (Phase D).
+    pub fn build_with_options(&self, max_tokens: usize, include_error_hints: bool) -> Result<SummaryDocument> {
         let cache_key = format!("project_summary::{max_tokens}");
-        if let Some(cached) = self.try_get_cached(&cache_key, 3600)? {
+        if let Some(mut cached) = self.try_get_cached(&cache_key, 3600)? {
+            if include_error_hints {
+                self.append_error_hints(&mut cached);
+            }
             return Ok(cached);
         }
-        let doc = self.build_fresh(max_tokens)?;
+        let mut doc = self.build_fresh(max_tokens)?;
+        if include_error_hints {
+            self.append_error_hints(&mut doc);
+        }
         self.store_cached(&cache_key, &doc)?;
         Ok(doc)
+    }
+
+    fn append_error_hints(&self, doc: &mut SummaryDocument) {
+        // Requires error_log schema to exist; silently skip if not.
+        let Ok(patterns) = self.storage.list_error_patterns(20) else { return; };
+        let recurring: Vec<String> = patterns
+            .into_iter()
+            .filter(|p| p.hit_count >= 3)
+            .take(5)
+            .map(|p| format!("{:?} (×{})", p.message, p.hit_count))
+            .collect();
+        if !recurring.is_empty() {
+            let note = format!("Recurring issues: {}", recurring.join(", "));
+            doc.summary_text.push_str(&format!("\n\n### Recurring Issues\n{note}\n"));
+            doc.narrative.push_str(&format!(" {note}."));
+        }
     }
 
     fn build_fresh(&self, max_tokens: usize) -> Result<SummaryDocument> {

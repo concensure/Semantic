@@ -1361,6 +1361,162 @@ fn remap_symbol_id(temp_symbol_id: i64, inserted_nodes: &[LogicNodeRecord]) -> i
         .unwrap_or_default()
 }
 
+impl Storage {
+    // ── error log ─────────────────────────────────────────────────────────
+
+    pub fn ensure_error_log_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS error_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                error_hash TEXT UNIQUE NOT NULL,
+                error_kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                file_hint TEXT NOT NULL DEFAULT '',
+                symbol_hint TEXT NOT NULL DEFAULT '',
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                hit_count INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_error_kind ON error_patterns(error_kind);
+            CREATE INDEX IF NOT EXISTS idx_error_hash ON error_patterns(error_hash);
+            CREATE TABLE IF NOT EXISTS error_solutions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern_id INTEGER NOT NULL REFERENCES error_patterns(id),
+                solution TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                applied_at INTEGER NOT NULL,
+                token_cost INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_solution_pattern ON error_solutions(pattern_id);",
+        )?;
+        Ok(())
+    }
+
+    /// Upsert an error pattern. Returns the pattern id.
+    pub fn upsert_error_pattern(
+        &self,
+        hash: &str,
+        kind: &str,
+        message: &str,
+        file_hint: &str,
+        symbol_hint: &str,
+        now: u64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO error_patterns (error_hash, error_kind, message, file_hint, symbol_hint, first_seen, last_seen, hit_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1)
+             ON CONFLICT(error_hash) DO UPDATE SET
+               last_seen = excluded.last_seen,
+               hit_count = hit_count + 1",
+            rusqlite::params![hash, kind, message, file_hint, symbol_hint, now as i64],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM error_patterns WHERE error_hash = ?1",
+            rusqlite::params![hash],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_error_solution(
+        &self,
+        pattern_id: i64,
+        solution: &str,
+        outcome: &str,
+        applied_at: u64,
+        token_cost: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO error_solutions (pattern_id, solution, outcome, applied_at, token_cost) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![pattern_id, solution, outcome, applied_at as i64, token_cost],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn find_error_patterns_by_hash(
+        &self,
+        hash: &str,
+    ) -> Result<Vec<engine::ErrorPattern>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, error_hash, error_kind, message, file_hint, symbol_hint, first_seen, last_seen, hit_count
+             FROM error_patterns WHERE error_hash = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![hash], map_error_pattern)?;
+        let collected: rusqlite::Result<Vec<engine::ErrorPattern>> = rows.collect();
+        Ok(collected.unwrap_or_default())
+    }
+
+    pub fn find_error_patterns_by_kind(
+        &self,
+        kind: &str,
+        limit: usize,
+    ) -> Result<Vec<engine::ErrorPattern>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, error_hash, error_kind, message, file_hint, symbol_hint, first_seen, last_seen, hit_count
+             FROM error_patterns WHERE error_kind = ?1 ORDER BY hit_count DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![kind, limit as i64], map_error_pattern)?;
+        let collected: rusqlite::Result<Vec<engine::ErrorPattern>> = rows.collect();
+        Ok(collected.unwrap_or_default())
+    }
+
+    pub fn get_error_solutions(&self, pattern_id: i64) -> Result<Vec<engine::ErrorSolution>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, pattern_id, solution, outcome, applied_at, token_cost
+             FROM error_solutions WHERE pattern_id = ?1 ORDER BY applied_at DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern_id], |row: &rusqlite::Row<'_>| {
+            Ok(engine::ErrorSolution {
+                id: row.get(0)?,
+                pattern_id: row.get(1)?,
+                solution: row.get(2)?,
+                outcome: row.get(3)?,
+                applied_at: row.get::<_, i64>(4)? as u64,
+                token_cost: row.get(5)?,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<engine::ErrorSolution>> = rows.collect();
+        Ok(collected.unwrap_or_default())
+    }
+
+    /// Prune oldest error patterns when count exceeds max.
+    pub fn prune_error_patterns(&self, max: usize) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM error_patterns WHERE id IN (
+                SELECT id FROM error_patterns ORDER BY last_seen ASC
+                LIMIT MAX(0, (SELECT COUNT(*) FROM error_patterns) - ?1)
+             )",
+            rusqlite::params![max as i64],
+        )?;
+        Ok(())
+    }
+
+    /// List all error patterns ordered by hit_count desc.
+    pub fn list_error_patterns(&self, limit: usize) -> Result<Vec<engine::ErrorPattern>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, error_hash, error_kind, message, file_hint, symbol_hint, first_seen, last_seen, hit_count
+             FROM error_patterns ORDER BY hit_count DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], map_error_pattern)?;
+        let collected: rusqlite::Result<Vec<engine::ErrorPattern>> = rows.collect();
+        Ok(collected.unwrap_or_default())
+    }
+} // impl Storage (error log)
+
+fn map_error_pattern(row: &rusqlite::Row<'_>) -> rusqlite::Result<engine::ErrorPattern> {
+    Ok(engine::ErrorPattern {
+        id: row.get(0)?,
+        error_hash: row.get(1)?,
+        error_kind: row.get(2)?,
+        message: row.get(3)?,
+        file_hint: row.get(4)?,
+        symbol_hint: row.get(5)?,
+        first_seen: row.get::<_, i64>(6)? as u64,
+        last_seen: row.get::<_, i64>(7)? as u64,
+        hit_count: row.get(8)?,
+    })
+}
+
 pub fn default_paths(base: &Path) -> (PathBuf, PathBuf) {
     (
         base.join(".semantic").join("semantic.db"),

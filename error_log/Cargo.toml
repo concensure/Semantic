@@ -1,13 +1,12 @@
 [package]
-name = "project_summariser"
+name = "error_log"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-storage = { path = "../storage" }
 engine = { path = "../engine" }
-error_log = { path = "../error_log" }
+storage = { path = "../storage" }
