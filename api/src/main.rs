@@ -412,6 +412,7 @@ async fn retrieve(
                         "ok": true,
                         "operation": "get_project_summary",
                         "token_estimate": doc.token_estimate,
+                        "cache_hit": doc.cache_hit,
                         "summary": doc.to_json(),
                         "summary_text": doc.summary_text,
                     }),
@@ -1866,13 +1867,14 @@ async fn get_project_summary(
                 "token_estimate": doc.token_estimate,
                 "file_count": doc.file_count,
                 "module_count": doc.module_count,
-                "cache_hit": false,
+                "cache_hit": doc.cache_hit,
             }));
             telemetry.emit(event);
             let want_markdown = query.format.as_deref() == Some("markdown");
             Json(serde_json::json!({
                 "ok": true,
                 "token_estimate": doc.token_estimate,
+                "cache_hit": doc.cache_hit,
                 "summary": doc.to_json(),
                 "summary_text": if want_markdown { doc.summary_text } else { String::new() },
             }))
