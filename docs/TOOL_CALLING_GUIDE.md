@@ -196,11 +196,29 @@ Full manual alternative:
 | **Intent-driven retrieval** | refactor intent | `GetHybridRankedContext` instead of `GetPlannedContext` |
 | **Inline code** | understand intent | `reference_only=false` — code returned inline, no extra `GetCodeSpan` needed |
 | **Inline small spans** | `reference_only=true`, span ≤25 lines | Auto-fetches code and embeds `code_span` field; max 5 per call |
-| **Auto project summary** | First call, repo ≥50 files | Builds 800-token `GetProjectSummary` and prepends to response |
+| **Auto project summary** | First call, repo ≥50 files | Tiered `GetProjectSummary` prepended to response; suppressed on subsequent calls |
+| **Session summary suppression** | Session already received summary | `project_summary` is null/absent on repeat calls; only re-sent on re-index |
+| **Tiered summary** | Intent-driven | debug/refactor → Full (~800 tokens); understand/implement → Standard (~200 tokens); re-inject → Nano (~50 tokens) |
+| **Symbol-scoped summary** | Symbol resolved on Standard/Full tier | Modules filtered to those containing target symbol + direct deps; `summary_scope: "symbol_filtered"` |
+| **Compact refs** | All prompt-building paths | `serde_json::to_string` (not pretty-print) used for context refs in prompts |
+| **Compact context_phase** | FootprintFirst mode | `context_phase` value shortened to `"fp_staged"` (was verbose) |
+| **Candidate list cap** | All responses | `candidate_files` and `candidate_symbols` capped at 5 entries |
+| **Refs unchanged detection** | Same session, same symbol | `refs_unchanged: true` when context refs match previous call hash |
+| **Delta context mode** | Same session, same symbol, small change | `context_delta` contains `{added, removed}` ref arrays; `context_delta_mode: true` when <5 refs changed |
 | **Diff summary** | Re-index detected | Sends compact delta (1–5 new/removed files) or full summary (>5) |
 | **Debug augmentation** | debug intent | Appends `debug_candidates` (root-cause candidates if any) |
 | **Error hints** | debug intent, first summary | Recurring errors (≥3 hits) included in project summary |
 | **Escalation** | Context refs = 0 | Auto-runs `SearchSemanticSymbol`; result in `escalated_context` |
+
+## New Response Fields (2026-03-28)
+
+| Field | Type | Description |
+|---|---|---|
+| `refs_unchanged` | bool | True when context refs are identical to the previous call for this session+symbol |
+| `context_delta` | object or null | `{added: [...], removed: [...]}` ref arrays when delta mode is active |
+| `context_delta_mode` | bool | True when `context_delta` is present (fewer than 5 refs changed) |
+| `project_summary.summary_tier` | string | `"nano"`, `"standard"`, or `"full"` — tier used for this summary |
+| `project_summary.summary_scope` | string | `"symbol_filtered"` when modules were filtered to target symbol; `"full"` otherwise |
 
 ## Token Usage Guidance
 

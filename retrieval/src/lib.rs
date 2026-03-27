@@ -1246,7 +1246,7 @@ impl RetrievalService {
             {
                 with_prompt_light = format!(
                     "Structured context refs (delta from previous step):\n{}\n\nMinimal raw seed (autoroute):\n{}\n\nTask:\n{}",
-                    serde_json::to_string_pretty(&delta_refs).unwrap_or_default(),
+                    serde_json::to_string(&delta_refs).unwrap_or_default(),
                     minimal_raw_seed,
                     base_prompt
                 );
@@ -1287,7 +1287,7 @@ impl RetrievalService {
             let with_prompt_heavy = if task.requires_code_change && !raw_code_context.is_empty() {
                 format!(
                     "Structured context refs (delta from previous step):\n{}\n\nRaw code context (auto included for edit tasks):\n{}\n\nTask:\n{}",
-                    serde_json::to_string_pretty(
+                    serde_json::to_string(
                         &delta_refs
                             .iter()
                             .take(refs_used)
@@ -2171,8 +2171,6 @@ impl RetrievalService {
             &candidate_symbols,
             preferred_symbol,
         );
-        let confidence_band = confidence_band(confidence_score);
-
         if single_file_fast_path {
             let target_code = if include_raw_code {
                 read_span(
@@ -2195,21 +2193,15 @@ impl RetrievalService {
                 "single_file_fast_path": true,
                 "retrieval_strategy": "single_file_fast_path",
                 "mapping_mode": mapping_mode_key,
-                "context_phase": if mode == MappingMode::FootprintFirst { "footprint_stage_a_targeted_stage_b_conditional_stage_c" } else { "legacy_full" },
-                "candidate_files": candidate_files,
-                "candidate_symbols": candidate_symbols,
+                "context_phase": if mode == MappingMode::FootprintFirst { "fp_staged" } else { "legacy_full" },
+                "candidate_files": candidate_files.iter().take(5).collect::<Vec<_>>(),
+                "candidate_symbols": candidate_symbols.iter().take(5).collect::<Vec<_>>(),
                 "confidence_score": confidence_score,
-                "confidence_band": confidence_band,
                 "include_raw_code": include_raw_code,
                 "context": [{
                     "file": target_symbol.file,
-                    "module": file_to_module
-                        .get(&target_symbol.file)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string()),
                     "start": target_symbol.start_line,
                     "end": target_symbol.end_line,
-                    "priority": 0,
                     "raw_included": include_raw_code,
                     "code": target_code
                 }],
@@ -2392,7 +2384,6 @@ impl RetrievalService {
                 }
                 json!({
                     "file": item.file_path,
-                    "module": item.module_name,
                     "start": item.start_line,
                     "end": item.end_line,
                     "priority": item.priority,
@@ -2408,11 +2399,10 @@ impl RetrievalService {
             "plan": plan,
             "effective_breadth": breadth,
             "mapping_mode": mapping_mode_key,
-            "context_phase": if mode == MappingMode::FootprintFirst { "footprint_stage_a_targeted_stage_b_conditional_stage_c" } else { "legacy_full" },
-            "candidate_files": candidate_files,
-            "candidate_symbols": candidate_symbols,
+            "context_phase": if mode == MappingMode::FootprintFirst { "fp_staged" } else { "legacy_full" },
+            "candidate_files": candidate_files.iter().take(5).collect::<Vec<_>>(),
+            "candidate_symbols": candidate_symbols.iter().take(5).collect::<Vec<_>>(),
             "confidence_score": confidence_score,
-            "confidence_band": confidence_band,
             "small_repo_mode": file_count < policy.small_repo_file_threshold,
             "retrieval_strategy": "two_stage_rank_then_span_fetch",
             "include_raw_code": include_raw_code,
@@ -2838,6 +2828,13 @@ impl RetrievalService {
                 .unwrap_or_default();
             bscore.cmp(&ascore)
         });
+        // Strip internal-only fields from client-facing context items
+        for item in &mut ranked_context {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("module");
+                obj.remove("priority");
+            }
+        }
 
         Ok(json!({
             "query": query,
@@ -4026,10 +4023,8 @@ fn build_structured_context_refs(
                 .map(|item| {
                     json!({
                         "file": item.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
-                        "module": item.get("module").and_then(|v| v.as_str()).unwrap_or_default(),
                         "start": item.get("start").and_then(|v| v.as_u64()).unwrap_or_default(),
                         "end": item.get("end").and_then(|v| v.as_u64()).unwrap_or_default(),
-                        "priority": item.get("priority").and_then(|v| v.as_u64()).unwrap_or_default(),
                         "raw_included": item.get("raw_included").and_then(|v| v.as_bool()).unwrap_or(false)
                     })
                 })
@@ -4211,7 +4206,7 @@ fn build_light_prompt_from_refs(
         return base_prompt.to_string();
     }
     let subset: Vec<serde_json::Value> = refs.iter().take(count).cloned().collect();
-    let refs_text = serde_json::to_string_pretty(&subset).unwrap_or_default();
+    let refs_text = serde_json::to_string(&subset).unwrap_or_default();
     format!(
         "Structured context refs (delta from previous step):\n{}\n\nTask:\n{}",
         refs_text, base_prompt

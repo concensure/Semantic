@@ -97,6 +97,11 @@ struct SessionContextState {
     /// File set at the time the last project summary was delivered.
     /// Retained across re-indexes so the next delivery can send only the delta.
     last_summary_file_set: HashSet<String>,
+    /// Hash of the last serialized refs per symbol, keyed by symbol name.
+    /// Used to detect unchanged refs and set `refs_unchanged: true` (#10).
+    last_refs_hash: HashMap<String, u64>,
+    /// Last context ref keys (file:start-end) per symbol, for delta detection (#11).
+    last_context_keys: HashMap<String, Vec<(String, u64, u64)>>,
 }
 
 impl Default for SemanticMiddlewareState {
@@ -272,6 +277,8 @@ fn touch_or_create_session<'a>(
             intent_symbol_cache: HashMap::new(),
             summary_delivered: false,
             last_summary_file_set: HashSet::new(),
+            last_refs_hash: HashMap::new(),
+            last_context_keys: HashMap::new(),
         });
     if entry.index_revision != index_revision {
         entry.index_revision = index_revision;
@@ -280,6 +287,8 @@ fn touch_or_create_session<'a>(
         entry.last_target_symbols.clear();
         entry.intent_symbol_cache.clear();
         entry.summary_delivered = false;
+        entry.last_refs_hash.clear();
+        entry.last_context_keys.clear();
         // last_summary_file_set is intentionally NOT cleared — kept for diff delivery.
     }
     entry.last_seen_epoch_s = now;
@@ -323,6 +332,16 @@ fn apply_session_context_reuse(
     }
     *context = filtered;
     reused
+}
+
+/// Simple FNV-1a 64-bit hash of a string slice (no external deps).
+fn fnv1a_hash(s: &str) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
 }
 
 async fn retrieve(
@@ -1084,6 +1103,9 @@ async fn ide_autoroute(
 
     let mut reused_context_count = 0usize;
     let mut auto_summary: Option<serde_json::Value> = None;
+    let mut refs_unchanged = false;
+    let mut context_delta: Option<serde_json::Value> = None;
+    let mut context_delta_mode = false;
     {
         let index_revision = state.retrieval.lock().index_revision();
         let mut middleware = state.semantic_middleware.lock();
@@ -1091,15 +1113,75 @@ async fn ide_autoroute(
         if reuse_session_context {
             reused_context_count = apply_session_context_reuse(&mut result, session);
         }
-        if let Some(symbol) = result.get("symbol").and_then(|v| v.as_str()) {
-            session.last_target_symbols.push_back(symbol.to_string());
+
+        // Determine the target symbol for this call
+        let current_symbol = result
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if !current_symbol.is_empty() {
+            session.last_target_symbols.push_back(current_symbol.clone());
             while session.last_target_symbols.len() > 32 {
                 session.last_target_symbols.pop_front();
             }
             session
                 .intent_symbol_cache
-                .insert(task.to_lowercase(), symbol.to_string());
+                .insert(task.to_lowercase(), current_symbol.clone());
         }
+
+        // #10: Detect unchanged refs — compare serialized refs hash with last call for this symbol
+        let current_refs_json = result
+            .get("context")
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
+            .unwrap_or_default();
+        let current_refs_hash = fnv1a_hash(&current_refs_json);
+        if !current_symbol.is_empty() {
+            if let Some(&prev_hash) = session.last_refs_hash.get(&current_symbol) {
+                if prev_hash == current_refs_hash && !current_refs_json.is_empty() {
+                    refs_unchanged = true;
+                }
+            }
+            session.last_refs_hash.insert(current_symbol.clone(), current_refs_hash);
+        }
+
+        // #11: Delta-only context — compute added/removed refs vs previous call for this symbol
+        if !current_symbol.is_empty() && !refs_unchanged {
+            let current_keys: Vec<(String, u64, u64)> = result
+                .get("context")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let f = item.get("file")?.as_str()?.to_string();
+                            let s = item.get("start")?.as_u64()?;
+                            let e = item.get("end")?.as_u64()?;
+                            Some((f, s, e))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(prev_keys) = session.last_context_keys.get(&current_symbol) {
+                let prev_set: HashSet<&(String, u64, u64)> = prev_keys.iter().collect();
+                let curr_set: HashSet<&(String, u64, u64)> = current_keys.iter().collect();
+                let added: Vec<_> = curr_set.difference(&prev_set).copied().collect();
+                let removed: Vec<_> = prev_set.difference(&curr_set).copied().collect();
+                let total_changed = added.len() + removed.len();
+                // Delta mode only when change is small and it's not the first call
+                if total_changed > 0 && total_changed < 5 {
+                    context_delta = Some(serde_json::json!({
+                        "added": added.iter().map(|t| serde_json::json!({"file":t.0,"start":t.1,"end":t.2})).collect::<Vec<_>>(),
+                        "removed": removed.iter().map(|t| serde_json::json!({"file":t.0,"start":t.1,"end":t.2})).collect::<Vec<_>>(),
+                    }));
+                    context_delta_mode = true;
+                }
+            }
+            session.last_context_keys.insert(current_symbol.clone(), current_keys);
+        }
+
+        // #9: Session-scoped project summary suppression — skip if already delivered
         if !session.summary_delivered {
             let file_count = state
                 .retrieval
@@ -1107,11 +1189,17 @@ async fn ide_autoroute(
                 .with_storage(|s| s.list_files().map(|f| f.len()))
                 .unwrap_or(0);
             if file_count >= AUTO_SUMMARY_FILE_THRESHOLD {
-                // #4: Inject recurring error hints when session starts in debug mode.
+                // Inject recurring error hints when session starts in debug mode.
                 let include_error_hints = intent == "debug";
 
-                // #10: If last_summary_file_set is populated, this is a re-index — build
-                // a compact delta note instead of repeating the full 800-token summary.
+                // #13: Tier selection by intent
+                let tier = match intent {
+                    "debug" | "refactor" => project_summariser::SummaryTier::Full,
+                    _ => project_summariser::SummaryTier::Standard,
+                };
+
+                // If last_summary_file_set is populated, this is a re-index — build
+                // a compact delta note instead of repeating the full summary.
                 let is_incremental = !session.last_summary_file_set.is_empty();
                 if is_incremental {
                     let current_files: HashSet<String> = state
@@ -1155,23 +1243,41 @@ async fn ide_autoroute(
                             "new_files": new_outlines,
                             "removed_files": removed_files,
                             "auto_injected": true,
+                            "summary_tier": "nano",
                         }));
                         session.last_summary_file_set = current_files;
                         session.summary_delivered = true;
                     } else {
-                        // Large diff: re-send the full summary.
+                        // Large diff: re-send the full summary using tiered builder.
+                        // #14: Filter modules by target symbol when applicable
+                        let sym_for_filter = if current_symbol.is_empty() { None } else { Some(current_symbol.as_str()) };
                         auto_summary = state
                             .retrieval
                             .lock()
                             .with_storage(|storage| {
-                                project_summariser::ProjectSummariser::new(storage)
-                                    .build_with_options(800, include_error_hints)
-                                    .ok()
-                                    .map(|doc| serde_json::json!({
-                                        "summary_text": doc.summary_text,
-                                        "token_estimate": doc.token_estimate,
-                                        "auto_injected": true,
-                                    }))
+                                let summariser = project_summariser::ProjectSummariser::new(storage);
+                                if let Some(sym) = sym_for_filter {
+                                    summariser
+                                        .build_with_symbol_filter(tier, sym, include_error_hints)
+                                        .ok()
+                                        .map(|(doc, filtered)| serde_json::json!({
+                                            "summary_text": doc.summary_text,
+                                            "token_estimate": doc.token_estimate,
+                                            "auto_injected": true,
+                                            "summary_tier": format!("{tier:?}").to_lowercase(),
+                                            "summary_scope": if filtered { "symbol_filtered" } else { "full" },
+                                        }))
+                                } else {
+                                    summariser
+                                        .build_tiered(tier, include_error_hints)
+                                        .ok()
+                                        .map(|doc| serde_json::json!({
+                                            "summary_text": doc.summary_text,
+                                            "token_estimate": doc.token_estimate,
+                                            "auto_injected": true,
+                                            "summary_tier": format!("{tier:?}").to_lowercase(),
+                                        }))
+                                }
                             });
                         if auto_summary.is_some() {
                             session.last_summary_file_set = current_files;
@@ -1179,19 +1285,36 @@ async fn ide_autoroute(
                         }
                     }
                 } else {
-                    // First-time delivery for this session: full summary.
+                    // First-time delivery for this session: tiered + symbol-filtered summary.
+                    // #14: Filter modules by target symbol when applicable
+                    let sym_for_filter = if current_symbol.is_empty() { None } else { Some(current_symbol.as_str()) };
                     auto_summary = state
                         .retrieval
                         .lock()
                         .with_storage(|storage| {
-                            project_summariser::ProjectSummariser::new(storage)
-                                .build_with_options(800, include_error_hints)
-                                .ok()
-                                .map(|doc| serde_json::json!({
-                                    "summary_text": doc.summary_text,
-                                    "token_estimate": doc.token_estimate,
-                                    "auto_injected": true,
-                                }))
+                            let summariser = project_summariser::ProjectSummariser::new(storage);
+                            if let Some(sym) = sym_for_filter {
+                                summariser
+                                    .build_with_symbol_filter(tier, sym, include_error_hints)
+                                    .ok()
+                                    .map(|(doc, filtered)| serde_json::json!({
+                                        "summary_text": doc.summary_text,
+                                        "token_estimate": doc.token_estimate,
+                                        "auto_injected": true,
+                                        "summary_tier": format!("{tier:?}").to_lowercase(),
+                                        "summary_scope": if filtered { "symbol_filtered" } else { "full" },
+                                    }))
+                            } else {
+                                summariser
+                                    .build_tiered(tier, include_error_hints)
+                                    .ok()
+                                    .map(|doc| serde_json::json!({
+                                        "summary_text": doc.summary_text,
+                                        "token_estimate": doc.token_estimate,
+                                        "auto_injected": true,
+                                        "summary_tier": format!("{tier:?}").to_lowercase(),
+                                    }))
+                            }
                         });
                     if auto_summary.is_some() {
                         let current_files: HashSet<String> = state
@@ -1286,6 +1409,9 @@ async fn ide_autoroute(
         "mapping_mode": mapping_mode.unwrap_or_else(|| "footprint_first".to_string()),
         "reuse_session_context": reuse_session_context,
         "reused_context_count": reused_context_count,
+        "refs_unchanged": refs_unchanged,
+        "context_delta": context_delta,
+        "context_delta_mode": context_delta_mode,
         "result": result,
         "debug_candidates": debug_candidates,
         "project_summary": if let Some(s) = auto_summary {
@@ -1293,14 +1419,20 @@ async fn ide_autoroute(
             Some(s)
         } else if include_summary {
             // Explicit caller override (e.g. small repos or forced refresh).
+            // Use Standard tier for understand/implement, Full for debug/refactor.
+            let tier = match intent {
+                "debug" | "refactor" => project_summariser::SummaryTier::Full,
+                _ => project_summariser::SummaryTier::Standard,
+            };
             state.retrieval.lock().with_storage(|storage| {
                 project_summariser::ProjectSummariser::new(storage)
-                    .build_with_options(800, intent == "debug")
+                    .build_tiered(tier, intent == "debug")
                     .ok()
                     .map(|doc| serde_json::json!({
                         "summary_text": doc.summary_text,
                         "token_estimate": doc.token_estimate,
                         "auto_injected": false,
+                        "summary_tier": format!("{tier:?}").to_lowercase(),
                     }))
             })
         } else {
