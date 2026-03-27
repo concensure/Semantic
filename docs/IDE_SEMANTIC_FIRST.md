@@ -67,9 +67,12 @@ flowchart TD
 - Sessions that reuse indexed context instead of repeatedly re-attaching raw files.
 - Planning-heavy workflows where dependency/impact context avoids broad file dumps.
 
-Recent benchmark note (2026-03-13):
+Recent benchmark note (2026-03-27):
 
-- After planner/autoroute hardening, the todo dev suite moved from `-18.62%` to positive token savings (`+5.70%` latest, `+8.07%` in another run) while preserving `11/11` task success in both arms.
+- Primary metric is **step savings** (fewer developer iterations), not token savings.
+- 2026-03-27: step savings = **+27.78%** (72 → 52 estimated steps), 11/11 success, avg retrieval 13 ms.
+- Token cost is -6.73% (slightly more per call) but produces significantly fewer back-and-forth cycles overall.
+- Prior hardening runs (2026-03-13): `+8.07%` and `+5.70%` token savings at `11/11` success.
 
 ## 5) When Token Usage Can Be Higher
 
@@ -102,6 +105,9 @@ Healthy signals:
 - For clear single-file edits: set `single_file_fast_path=true`.
 - Keep semantic-first enabled for planning, cross-file changes, and impact-sensitive edits.
 - Keep compression off for precision-sensitive symbol/span retrieval, unless original user query is preserved and passed explicitly.
+- Do **not** pass `session_id` manually — `ide_autoroute` auto-generates one and echoes it. Save and reuse `response.session_id` across calls.
+- Do **not** call `GetCodeSpan` for spans already inlined in `ide_autoroute` response (`code_span` field present).
+- Do **not** call `GetProjectSummary` manually on session start — auto-injected for repos ≥50 files.
 
 ## 7) Demo Project
 

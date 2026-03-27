@@ -91,6 +91,12 @@ struct SessionContextState {
     accepted_order: VecDeque<String>,
     last_target_symbols: VecDeque<String>,
     intent_symbol_cache: HashMap<String, String>,
+    /// True once GetProjectSummary has been auto-injected for this session.
+    /// Reset whenever the index revision changes (repo re-indexed).
+    summary_delivered: bool,
+    /// File set at the time the last project summary was delivered.
+    /// Retained across re-indexes so the next delivery can send only the delta.
+    last_summary_file_set: HashSet<String>,
 }
 
 impl Default for SemanticMiddlewareState {
@@ -264,6 +270,8 @@ fn touch_or_create_session<'a>(
             accepted_order: VecDeque::new(),
             last_target_symbols: VecDeque::new(),
             intent_symbol_cache: HashMap::new(),
+            summary_delivered: false,
+            last_summary_file_set: HashSet::new(),
         });
     if entry.index_revision != index_revision {
         entry.index_revision = index_revision;
@@ -271,6 +279,8 @@ fn touch_or_create_session<'a>(
         entry.accepted_order.clear();
         entry.last_target_symbols.clear();
         entry.intent_symbol_cache.clear();
+        entry.summary_delivered = false;
+        // last_summary_file_set is intentionally NOT cleared — kept for diff delivery.
     }
     entry.last_seen_epoch_s = now;
     entry
@@ -570,6 +580,21 @@ async fn ide_autoroute(
             ("max_tokens", serde_json::json!(body.max_tokens)),
         ]),
     );
+    // #1/#6: Auto-generate a session ID if the caller didn't provide one.
+    // Uses nanosecond timestamp for sufficient uniqueness without an extra crate.
+    // Echoed in every response so callers can reuse it across calls.
+    let effective_session_id: String = body.session_id
+        .as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "auto-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            )
+        });
     let response = telemetry.with_task_scope(scope.clone(), || {
     // Action-oriented dispatch: handle structured actions before intent-based routing
     if let Some(ref action) = body.action {
@@ -914,17 +939,33 @@ async fn ide_autoroute(
 
     let task = body.task.clone().unwrap_or_default();
     let intent = detect_ide_intent(&task);
-    let max_tokens = body.max_tokens.unwrap_or(1400);
+
+    // #5: Adaptive token budget — scale to task intent when caller doesn't override.
+    let max_tokens = body.max_tokens.unwrap_or_else(|| match intent {
+        "debug"     => 1600, // trace context + root cause candidates
+        "refactor"  => 2000, // cross-file call-site awareness
+        "implement" => 1400, // standard feature-add
+        _           =>  800, // "understand" — read-only, no edit plan needed
+    });
+
     let single_file_fast_path = body.single_file_fast_path.unwrap_or(true);
-    let reference_only = body.reference_only.unwrap_or(true);
+    // #2: "understand" tasks request inline code directly (saves a GetCodeSpan round-trip).
+    let reference_only = body.reference_only.unwrap_or(intent != "understand");
     let mapping_mode = body.mapping_mode.clone();
     let max_footprint_items = body.max_footprint_items;
     let reuse_session_context = body.reuse_session_context.unwrap_or(true);
     let include_summary = body.include_summary.unwrap_or(false);
     let auto_minimal_raw = body.auto_minimal_raw.unwrap_or(true);
 
+    // #2: "refactor" uses graph-aware hybrid ranking for better call-site coverage.
+    let (primary_operation, primary_tool_name): (Operation, &str) = if intent == "refactor" {
+        (Operation::GetHybridRankedContext, "get_hybrid_ranked_context")
+    } else {
+        (Operation::GetPlannedContext, "get_planned_context")
+    };
+
     let planned_request = RetrievalRequest {
-        operation: Operation::GetPlannedContext,
+        operation: primary_operation,
         name: None,
         query: Some(task.clone()),
         file: None,
@@ -955,7 +996,7 @@ async fn ide_autoroute(
         );
 
     let (selected_tool, mut result) = match planned {
-        Ok(r) => ("get_planned_context", r.result),
+        Ok(r) => (primary_tool_name, r.result),
         Err(_) => {
             let fallback = RetrievalRequest {
                 operation: Operation::SearchSemanticSymbol,
@@ -981,6 +1022,7 @@ async fn ide_autoroute(
                 Err(err) => {
                     return Json(serde_json::json!({
                         "ok": false,
+                        "session_id": effective_session_id.as_str(),
                         "intent": intent,
                         "selected_tool": "none",
                         "error": err.to_string()
@@ -990,11 +1032,62 @@ async fn ide_autoroute(
         }
     };
 
+    // #8: Coverage-gated escalation — if planned context returned no refs, automatically
+    // fall back to semantic symbol search to avoid sending the LLM a bare task description.
+    {
+        let context_refs_count = result
+            .get("context")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if context_refs_count == 0 && selected_tool != "search_semantic_symbol" {
+            let escalation_req = RetrievalRequest {
+                operation: Operation::SearchSemanticSymbol,
+                name: None,
+                query: Some(task.clone()),
+                limit: Some(6),
+                ..Default::default()
+            };
+            if let Ok(r) = state.retrieval.lock().handle(escalation_req) {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("escalated_context".to_string(), r.result);
+                    obj.insert(
+                        "escalation_reason".to_string(),
+                        serde_json::json!("planned_context_returned_no_refs"),
+                    );
+                }
+            }
+        }
+    }
+
+    // #2: Debug intent augmentation — attach root cause candidates when available.
+    // Only populated when the debug_graph state has been built by a prior debug action.
+    let debug_candidates: Option<serde_json::Value> = if intent == "debug" {
+        state
+            .retrieval
+            .lock()
+            .get_root_cause_candidates()
+            .ok()
+            .filter(|v| {
+                v.get("root_cause_candidates")
+                    .and_then(|c| c.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false)
+            })
+    } else {
+        None
+    };
+
+    // Repos with at least this many indexed files receive an automatic project
+    // summary on the first ide_autoroute call of the session.
+    const AUTO_SUMMARY_FILE_THRESHOLD: usize = 50;
+
     let mut reused_context_count = 0usize;
-    if let Some(session_id) = body.session_id {
+    let mut auto_summary: Option<serde_json::Value> = None;
+    {
         let index_revision = state.retrieval.lock().index_revision();
         let mut middleware = state.semantic_middleware.lock();
-        let session = touch_or_create_session(&mut middleware, &session_id, index_revision);
+        let session = touch_or_create_session(&mut middleware, &effective_session_id, index_revision);
         if reuse_session_context {
             reused_context_count = apply_session_context_reuse(&mut result, session);
         }
@@ -1006,6 +1099,116 @@ async fn ide_autoroute(
             session
                 .intent_symbol_cache
                 .insert(task.to_lowercase(), symbol.to_string());
+        }
+        if !session.summary_delivered {
+            let file_count = state
+                .retrieval
+                .lock()
+                .with_storage(|s| s.list_files().map(|f| f.len()))
+                .unwrap_or(0);
+            if file_count >= AUTO_SUMMARY_FILE_THRESHOLD {
+                // #4: Inject recurring error hints when session starts in debug mode.
+                let include_error_hints = intent == "debug";
+
+                // #10: If last_summary_file_set is populated, this is a re-index — build
+                // a compact delta note instead of repeating the full 800-token summary.
+                let is_incremental = !session.last_summary_file_set.is_empty();
+                if is_incremental {
+                    let current_files: HashSet<String> = state
+                        .retrieval
+                        .lock()
+                        .with_storage(|s| s.list_files())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    let new_files: Vec<String> = current_files
+                        .difference(&session.last_summary_file_set)
+                        .take(10)
+                        .cloned()
+                        .collect();
+                    let removed_files: Vec<String> = session
+                        .last_summary_file_set
+                        .difference(&current_files)
+                        .take(10)
+                        .cloned()
+                        .collect();
+                    let diff_size = new_files.len() + removed_files.len();
+                    if diff_size == 0 {
+                        // Index refreshed but no structural file changes — skip re-delivery.
+                        session.last_summary_file_set = current_files;
+                        session.summary_delivered = true;
+                    } else if diff_size <= 5 {
+                        // Small diff: send a compact delta note (much cheaper than full summary).
+                        let new_outlines: Vec<serde_json::Value> = new_files
+                            .iter()
+                            .filter_map(|f| {
+                                let req = RetrievalRequest {
+                                    operation: Operation::GetFileOutline,
+                                    file: Some(f.clone()),
+                                    ..Default::default()
+                                };
+                                state.retrieval.lock().handle(req).ok().map(|r| r.result)
+                            })
+                            .collect();
+                        auto_summary = Some(serde_json::json!({
+                            "type": "index_refresh_delta",
+                            "new_files": new_outlines,
+                            "removed_files": removed_files,
+                            "auto_injected": true,
+                        }));
+                        session.last_summary_file_set = current_files;
+                        session.summary_delivered = true;
+                    } else {
+                        // Large diff: re-send the full summary.
+                        auto_summary = state
+                            .retrieval
+                            .lock()
+                            .with_storage(|storage| {
+                                project_summariser::ProjectSummariser::new(storage)
+                                    .build_with_options(800, include_error_hints)
+                                    .ok()
+                                    .map(|doc| serde_json::json!({
+                                        "summary_text": doc.summary_text,
+                                        "token_estimate": doc.token_estimate,
+                                        "auto_injected": true,
+                                    }))
+                            });
+                        if auto_summary.is_some() {
+                            session.last_summary_file_set = current_files;
+                            session.summary_delivered = true;
+                        }
+                    }
+                } else {
+                    // First-time delivery for this session: full summary.
+                    auto_summary = state
+                        .retrieval
+                        .lock()
+                        .with_storage(|storage| {
+                            project_summariser::ProjectSummariser::new(storage)
+                                .build_with_options(800, include_error_hints)
+                                .ok()
+                                .map(|doc| serde_json::json!({
+                                    "summary_text": doc.summary_text,
+                                    "token_estimate": doc.token_estimate,
+                                    "auto_injected": true,
+                                }))
+                        });
+                    if auto_summary.is_some() {
+                        let current_files: HashSet<String> = state
+                            .retrieval
+                            .lock()
+                            .with_storage(|s| s.list_files())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
+                        session.last_summary_file_set = current_files;
+                        session.summary_delivered = true;
+                    }
+                }
+            } else {
+                // Small repo — mark delivered so we never re-check on every call.
+                session.summary_delivered = true;
+            }
         }
     }
 
@@ -1029,8 +1232,53 @@ async fn ide_autoroute(
         }
     }
 
+    // #3: Inline small spans — for each reference-only context item with ≤ 25 lines,
+    // fetch and embed the actual code. Eliminates a GetCodeSpan round-trip for short
+    // functions and types. Capped at 5 items per request to bound I/O latency.
+    if reference_only {
+        let mut inlined = 0usize;
+        if let Some(context_arr) = result.get_mut("context").and_then(|v| v.as_array_mut()) {
+            for item in context_arr.iter_mut() {
+                if inlined >= 5 {
+                    break;
+                }
+                let file = item
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let start = item.get("start").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let end = item.get("end").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if file.is_empty()
+                    || start == 0
+                    || end < start
+                    || (end - start) > 25
+                    || item.get("code_span").is_some()
+                {
+                    continue;
+                }
+                let span_req = RetrievalRequest {
+                    operation: Operation::GetCodeSpan,
+                    file: Some(file),
+                    start_line: Some(start),
+                    end_line: Some(end),
+                    ..Default::default()
+                };
+                if let Ok(r) = state.retrieval.lock().handle(span_req) {
+                    if let Some(code) = r.result.get("code").and_then(|v| v.as_str()) {
+                        if let Some(obj) = item.as_object_mut() {
+                            obj.insert("code_span".to_string(), serde_json::json!(code));
+                            inlined += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Json(serde_json::json!({
         "ok": true,
+        "session_id": effective_session_id.as_str(),
         "intent": intent,
         "selected_tool": selected_tool,
         "single_file_fast_path": single_file_fast_path,
@@ -1039,14 +1287,20 @@ async fn ide_autoroute(
         "reuse_session_context": reuse_session_context,
         "reused_context_count": reused_context_count,
         "result": result,
-        "project_summary": if include_summary {
+        "debug_candidates": debug_candidates,
+        "project_summary": if let Some(s) = auto_summary {
+            // Auto-injected on first call of a new session for medium/large repos.
+            Some(s)
+        } else if include_summary {
+            // Explicit caller override (e.g. small repos or forced refresh).
             state.retrieval.lock().with_storage(|storage| {
                 project_summariser::ProjectSummariser::new(storage)
-                    .build(800)
+                    .build_with_options(800, intent == "debug")
                     .ok()
                     .map(|doc| serde_json::json!({
                         "summary_text": doc.summary_text,
                         "token_estimate": doc.token_estimate,
+                        "auto_injected": false,
                     }))
             })
         } else {

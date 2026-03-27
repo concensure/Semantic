@@ -173,18 +173,34 @@ Legacy MCP tools (backward compatible, deprecated):
 
 ## Suggested Call Sequence in IDE Agents
 
+**Recommended — 2-call pattern (2026-03-27):**
+
+1. Call `ide_autoroute` with `{ task }`. `session_id` is optional — auto-generated and echoed in `response.session_id`. Save it.
+2. If the task requires an edit: call `retrieve` with `{ operation: "PlanSafeEdit", name, edit_description, session_id }`.
+
+Full manual alternative:
+
 1. For planning: call `get_planned_context`.
 2. For pinpointing edits: call `search_symbol` or `get_code_span`.
 3. For cross-file risk: call `get_dependency_neighborhood` or `get_reasoning_context`.
 4. For patch planning: call `plan_safe_edit` or `/edit`.
 5. For obvious single-file edits: set `single_file_fast_path=true`.
 
-IDE-native shortcut:
+## Auto Features (active by default in `ide_autoroute`)
 
-1. Call `ide_autoroute` first with `{ task, session_id, max_tokens, single_file_fast_path, reference_only }`.
-2. Use returned `selected_tool` + `result` as the first semantic context.
-3. If editing is needed, use `result.minimal_raw_seed` (auto-filled when `reference_only=true`) as the smallest editable raw span.
-4. Continue with `plan_safe_edit` / `/edit` using the same `session_id`.
+| Feature | Condition | Behaviour |
+|---|---|---|
+| **Auto session ID** | `session_id` omitted | Nanosecond-precision ID generated; echoed in `response.session_id` |
+| **Intent detection** | Any task | Classifies as `debug`, `refactor`, `implement`, or `understand` |
+| **Adaptive token budget** | No `max_tokens` override | debug=1600, refactor=2000, implement=1400, understand=800 |
+| **Intent-driven retrieval** | refactor intent | `GetHybridRankedContext` instead of `GetPlannedContext` |
+| **Inline code** | understand intent | `reference_only=false` — code returned inline, no extra `GetCodeSpan` needed |
+| **Inline small spans** | `reference_only=true`, span ≤25 lines | Auto-fetches code and embeds `code_span` field; max 5 per call |
+| **Auto project summary** | First call, repo ≥50 files | Builds 800-token `GetProjectSummary` and prepends to response |
+| **Diff summary** | Re-index detected | Sends compact delta (1–5 new/removed files) or full summary (>5) |
+| **Debug augmentation** | debug intent | Appends `debug_candidates` (root-cause candidates if any) |
+| **Error hints** | debug intent, first summary | Recurring errors (≥3 hits) included in project summary |
+| **Escalation** | Context refs = 0 | Auto-runs `SearchSemanticSymbol`; result in `escalated_context` |
 
 ## Token Usage Guidance
 
@@ -248,9 +264,13 @@ Additional A/B hardening updates (2026-03-13):
 
 Recent A/B results (todo dev suite):
 
-- prior baseline: `-18.62%` token savings
-- post-improvements runs: `+8.07%` and `+5.70%` token savings
-- task success remained `11/11` for both arms
+| Date | Token savings | Step savings | Task success |
+|---|---:|---:|---:|
+| 2026-03-13 baseline | -18.62% | — | 11/11 |
+| 2026-03-13 hardened | +5.70–8.07% | — | 11/11 |
+| **2026-03-27** | -6.73% | **+27.78%** | **11/11** |
+
+Primary metric is **step savings** (27.78% fewer developer iterations), not token savings per call. See `docs/AB_TEST_DEV_RESULTS.md` for full breakdown.
 
 ## Discoverability
 

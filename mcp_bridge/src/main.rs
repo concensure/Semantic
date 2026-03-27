@@ -152,35 +152,48 @@ async fn list_tools() -> Json<serde_json::Value> {
             "name": "retrieve",
             "method": "POST",
             "endpoint": "/retrieve",
-            "description": "Targeted retrieval and analysis. Use AFTER ide_autoroute gives you orientation. Required: `operation`. Operations by use-case — orientation: GetProjectSummary; symbol lookup: SearchSymbol (name), GetFileOutline (file), GetCodeSpan (file,start_line,end_line); deep context: GetPlannedContext (query,max_tokens), GetReasoningContext (name); before any edit: PlanSafeEdit (name,edit_description) — always call this before writing code to scope impact; diagnostics: GetPerformanceStats, GetRepoMap. Optional: session_id (pass consistently to deduplicate context), reference_only (true = structured refs, omit raw code), single_file_fast_path (true = target symbol only, fastest)."
+            "description": "Targeted retrieval and analysis. Use AFTER ide_autoroute gives you orientation. Required: `operation`. Operations by use-case — symbol lookup: SearchSymbol (name), GetFileOutline (file), GetCodeSpan (file,start_line,end_line); deep context: GetPlannedContext (query,max_tokens), GetReasoningContext (name); before any edit: PlanSafeEdit (name,edit_description) — always call before writing code; diagnostics: GetPerformanceStats, GetRepoMap. Optional: session_id (pass the id echoed by ide_autoroute to deduplicate), reference_only (default true = structured refs; false = inline code), single_file_fast_path (true = target symbol only)."
         },
         {
             "name": "ide_autoroute",
             "method": "POST",
             "endpoint": "/ide_autoroute",
-            "description": "Start here for every task. Two modes. (1) Task mode: pass `task` (natural language) + `session_id` — auto-detects intent, assembles minimal budgeted context, deduplicates spans already seen this session. Use for all code tasks before reaching for retrieve. (2) Action mode: pass `action` + `action_input` for specific operations: semantic_middleware_set (call once per session with {enabled:true,session_id:\"<id>\"} to activate deduplication), debug_failure, generate_tests, apply_tests, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, env_check, ab_test_dev."
+            "description": "Start here for every task. Two modes. (1) Task mode: pass `task` (natural language). session_id is optional — auto-generated when omitted and echoed back in response.session_id; reuse it across calls to activate deduplication and avoid re-sending seen context. Intent is auto-detected: debug→1600-token budget+root-cause candidates; refactor→2000-token hybrid-ranked context; implement→1400 tokens; understand→800 tokens+inline code. Short spans (≤25 lines) are inlined automatically. Project summary auto-injected on first call for repos with ≥50 files. (2) Action mode: pass `action`+`action_input`: semantic_middleware_set, debug_failure, generate_tests, apply_tests, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, env_check, ab_test_dev."
         }
     ]);
-    // Recommended execution order (call in this sequence for minimal token cost and correct context):
-    // 1. ide_autoroute  action=semantic_middleware_set  {enabled:true, session_id:"<stable-id>"}  — activate session dedup (once per session)
-    // 2. ide_autoroute  task="<your task description>"  session_id="<stable-id>"                  — get oriented, auto-planned context
-    // 3. retrieve        operation=PlanSafeEdit  name="<symbol>"  edit_description="<what>"        — scope edit impact before writing any code
-    // 4. retrieve        operation=GetPlannedContext / SearchSymbol / GetCodeSpan                  — targeted lookups as needed
+    // Recommended execution order (minimal token cost, correct context):
+    // 1. ide_autoroute  task="<task>"                           — always first. Returns session_id, intent-adapted context,
+    //                                                             project_summary (first call, large repos), debug_candidates (debug intent).
+    //                                                             Save response.session_id and pass it on every subsequent call.
+    // 2. retrieve        operation=PlanSafeEdit  name="<sym>"   — before writing any multi-file edit. Scopes impact, lists affected files.
+    // 3. retrieve        operation=<specific>    session_id=...  — targeted follow-up only when step-1 context is insufficient.
     // IMPORTANT: if retrieve.GetPerformanceStats shows files_parse_failed > 0, check
-    //   indexing.last_parse_fail_paths — those files are absent from the index and the LLM
-    //   will not receive context for them. Read those files directly before editing them.
+    //   indexing.last_parse_fail_paths — those files are absent from the index.
+    //   Read them directly before editing.
     Json(serde_json::json!({"ok": true, "tools": primary, "workflow": {
         "steps": [
-            {"step": 1, "tool": "ide_autoroute", "call": {"action": "semantic_middleware_set", "action_input": {"enabled": true, "session_id": "<stable-id>"}}, "note": "Once per session. Activates context deduplication — prevents re-sending spans the LLM already has."},
-            {"step": 2, "tool": "ide_autoroute", "call": {"task": "<describe task in plain english>", "session_id": "<stable-id>"}, "note": "For every task. Auto-plans retrieval, returns minimal budgeted context. Check response.indexing.files_parse_failed — if > 0, read those files directly."},
-            {"step": 3, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>"}, "note": "Before writing any code. Returns impact scope, affected files, and required context bundle. Skip only for trivial single-symbol edits with no callers."},
-            {"step": 4, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<stable-id>"}, "note": "Targeted follow-up only. Use when step 2 context is insufficient for a specific symbol."}
+            {"step": 1, "tool": "ide_autoroute", "call": {"task": "<describe task in plain english>"}, "note": "Always first. session_id is auto-generated if omitted — save response.session_id and reuse it. Intent is auto-detected: debug/refactor/implement/understand each get a different token budget, retrieval strategy, and response shape."},
+            {"step": 2, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>", "session_id": "<from step 1 response>"}, "note": "Before writing any code that touches more than one function. Returns impact scope and affected files. Skip only for isolated single-symbol edits with no callers."},
+            {"step": 3, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<from step 1 response>"}, "note": "Targeted follow-up only. Use when step-1 context is insufficient. Pass the same session_id to suppress already-seen spans."}
+        ],
+        "intent_behaviour": {
+            "debug":     "budget=1600, hybrid context, root_cause_candidates attached if debug_graph has state",
+            "refactor":  "budget=2000, GetHybridRankedContext (graph-aware call-site ranking)",
+            "implement": "budget=1400, GetPlannedContext (standard)",
+            "understand":"budget=800, reference_only=false (inline code, no GetCodeSpan round-trip needed)"
+        },
+        "auto_features": [
+            "session_id is auto-generated when omitted — always echo response.session_id back on next call.",
+            "Project summary auto-injected on first call per session for repos >= 50 files.",
+            "After re-index: compact delta note (new/removed files only) instead of full summary re-send.",
+            "Context spans <= 25 lines are inlined automatically — no separate GetCodeSpan needed.",
+            "Empty-context escalation: if planner returns no refs, SearchSemanticSymbol runs automatically."
         ],
         "anti_patterns": [
             "Do NOT call retrieve before ide_autoroute — you will over-fetch without intent detection.",
-            "Do NOT omit session_id — without it, every call re-sends already-seen context.",
+            "Do NOT discard response.session_id — losing it resets deduplication and re-sends seen context.",
             "Do NOT skip PlanSafeEdit for multi-file edits — you will miss callers and break dependents.",
-            "Do NOT use GetCodeSpan for orientation — use GetProjectSummary or ide_autoroute(task) first."
+            "Do NOT call GetCodeSpan for spans already inlined in response.result.context[*].code_span."
         ]
     }}))
 }
