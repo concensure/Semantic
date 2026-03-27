@@ -3,6 +3,17 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Controls how much detail the project summary includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryTier {
+    /// ~50 tokens: narrative (truncated to 300 chars) + entry_points list only.
+    Nano,
+    /// ~200 tokens: narrative + modules with top files (existing behaviour).
+    Standard,
+    /// ~800 tokens: everything including dependency_sketch.
+    Full,
+}
+
 pub struct ProjectSummariser<'a> {
     storage: &'a storage::Storage,
 }
@@ -14,6 +25,95 @@ impl<'a> ProjectSummariser<'a> {
 
     pub fn build(&self, max_tokens: usize) -> Result<SummaryDocument> {
         self.build_with_options(max_tokens, false)
+    }
+
+    /// Build a tiered summary. Token budget is chosen per tier:
+    /// Nano=50, Standard=200, Full=800. The `include_error_hints` flag
+    /// is still honoured for Standard and Full tiers.
+    pub fn build_tiered(
+        &self,
+        tier: SummaryTier,
+        include_error_hints: bool,
+    ) -> Result<SummaryDocument> {
+        let max_tokens = match tier {
+            SummaryTier::Nano => 50,
+            SummaryTier::Standard => 200,
+            SummaryTier::Full => 800,
+        };
+        let mut doc = self.build_with_options(max_tokens, include_error_hints)?;
+        if tier == SummaryTier::Nano {
+            // Truncate narrative to 300 chars and clear full module list
+            doc.narrative = doc.narrative.chars().take(300).collect();
+            doc.modules.clear();
+            doc.dependency_sketch = String::new();
+            // Rebuild a minimal summary_text
+            let ep = doc.entry_points.iter()
+                .map(|p| std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(p))
+                .collect::<Vec<_>>()
+                .join(", ");
+            doc.summary_text = format!("{}\nEntry points: {}", doc.narrative, ep);
+            doc.token_estimate = (doc.summary_text.len() / 4).max(1);
+        } else if tier == SummaryTier::Standard {
+            // Standard: keep narrative + modules, but omit dep_sketch from summary_text
+            doc.dependency_sketch = String::new();
+            doc.summary_text = build_markdown(&doc.narrative, &doc.modules, "", &doc.entry_points);
+            doc.token_estimate = (doc.summary_text.len() / 4).max(1);
+        }
+        Ok(doc)
+    }
+
+    /// Build a summary filtered to modules relevant to `target_symbol`.
+    /// For Nano tier, module filtering is skipped (already minimal).
+    /// Returns `summary_scope = "symbol_filtered"` when filtering is applied.
+    pub fn build_with_symbol_filter(
+        &self,
+        tier: SummaryTier,
+        target_symbol: &str,
+        include_error_hints: bool,
+    ) -> Result<(SummaryDocument, bool)> {
+        let mut doc = self.build_tiered(tier, include_error_hints)?;
+        if tier == SummaryTier::Nano || target_symbol.is_empty() {
+            return Ok((doc, false));
+        }
+        // Collect files that contain the target symbol or its direct neighbours
+        let relevant_files: HashSet<String> = {
+            let mut set = HashSet::new();
+            if let Ok(Some(sym)) = self.storage.get_symbol_any(target_symbol) {
+                set.insert(sym.file.clone());
+                if let Some(id) = sym.id {
+                    if let Ok(deps) = self.storage.get_symbol_dependencies(id) {
+                        for d in &deps { set.insert(d.file.clone()); }
+                    }
+                    if let Ok(callers) = self.storage.get_dependency_neighbors(id, 1) {
+                        for c in &callers { set.insert(c.file.clone()); }
+                    }
+                }
+            }
+            set
+        };
+        if relevant_files.is_empty() {
+            return Ok((doc, false));
+        }
+        // Filter modules to only those with at least one relevant file
+        doc.modules.retain(|m| {
+            m.get("files")
+                .and_then(|v| v.as_array())
+                .map(|files| files.iter().any(|f| {
+                    f.get("path").and_then(|p| p.as_str()).map(|p| relevant_files.contains(p)).unwrap_or(false)
+                }))
+                .unwrap_or(false)
+        });
+        if doc.modules.is_empty() {
+            // No module filter applied (symbol not found in modules) — return unfiltered
+            let unfiltered = self.build_tiered(tier, include_error_hints)?;
+            return Ok((unfiltered, false));
+        }
+        doc.summary_text = build_markdown(&doc.narrative, &doc.modules, &doc.dependency_sketch, &doc.entry_points);
+        doc.token_estimate = (doc.summary_text.len() / 4).max(1);
+        Ok((doc, true))
     }
 
     /// Build with optional recurring-issues note appended (Phase D).

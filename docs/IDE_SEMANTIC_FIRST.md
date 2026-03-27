@@ -109,6 +109,23 @@ Healthy signals:
 - Do **not** call `GetCodeSpan` for spans already inlined in `ide_autoroute` response (`code_span` field present).
 - Do **not** call `GetProjectSummary` manually on session start — auto-injected for repos ≥50 files.
 
+## 7) Token-Saving Enhancements (2026-03-28)
+
+The following optimisations reduce per-call token usage without degrading retrieval quality:
+
+| Enhancement | Where | Effect |
+|---|---|---|
+| Compact JSON refs | `retrieval/src/lib.rs` prompt-building path | Removes whitespace from context refs in prompts |
+| Short `context_phase` | `retrieval/src/lib.rs` response | `"fp_staged"` replaces verbose phase name |
+| No `confidence_band` in response | `retrieval/src/lib.rs` context response | Removed from client JSON; retained in A/B test storage |
+| `candidate_files/symbols` capped | `retrieval/src/lib.rs` | Max 5 entries in response arrays |
+| No `module`/`priority` in prompt refs | `retrieval/src/lib.rs` | Stripped from `build_structured_context_refs` output |
+| Session summary suppression | `api/src/main.rs` | Project summary injected once per session; null on repeat calls |
+| Refs unchanged detection | `api/src/main.rs` | `refs_unchanged: true` signals LLM can skip re-reading context |
+| Delta context mode | `api/src/main.rs` | Only changed refs returned when <5 refs differ from previous call |
+| Tiered project summary | `project_summariser/src/lib.rs` | Nano/Standard/Full tiers; intent-driven tier selection |
+| Symbol-scoped summary | `project_summariser/src/lib.rs` + `api/src/main.rs` | Modules filtered to target symbol + deps on Standard/Full tier |
+
 ## 7) Demo Project
 
 The semantic repository includes a demo todo app used by A/B development tasks:

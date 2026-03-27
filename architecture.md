@@ -25,7 +25,7 @@ Provide deterministic, minimal-span code retrieval for agents using symbol, depe
 - `llm_router`: task-based, performance-aware provider routing.
 - `policy_engine`: user-defined safety/approval enforcement.
 - `watcher`: file event handler for incremental refresh.
-- `api`: local JSON server on `127.0.0.1:4317`.
+- `api`: local JSON server on `<LOCAL_SERVICE_HOST>`.
 
 ## Retrieval Layers
 
