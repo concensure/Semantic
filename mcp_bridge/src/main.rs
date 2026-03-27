@@ -152,16 +152,37 @@ async fn list_tools() -> Json<serde_json::Value> {
             "name": "retrieve",
             "method": "POST",
             "endpoint": "/retrieve",
-            "description": "All retrieval and graph operations. Required: `operation` (string). Key operations: GetRepoMap, GetFileOutline (file), SearchSymbol (name), GetCodeSpan (file,start_line,end_line), GetPlannedContext (query,max_tokens), GetReasoningContext (name,logic_radius,dependency_radius), PlanSafeEdit (name,edit_description), GetHybridRankedContext (query), GetPerformanceStats, GetProjectSummary (max_tokens?,format?). Optional: session_id, single_file_fast_path, reference_only, mapping_mode, workspace_mode (bool)."
+            "description": "Targeted retrieval and analysis. Use AFTER ide_autoroute gives you orientation. Required: `operation`. Operations by use-case — orientation: GetProjectSummary; symbol lookup: SearchSymbol (name), GetFileOutline (file), GetCodeSpan (file,start_line,end_line); deep context: GetPlannedContext (query,max_tokens), GetReasoningContext (name); before any edit: PlanSafeEdit (name,edit_description) — always call this before writing code to scope impact; diagnostics: GetPerformanceStats, GetRepoMap. Optional: session_id (pass consistently to deduplicate context), reference_only (true = structured refs, omit raw code), single_file_fast_path (true = target symbol only, fastest)."
         },
         {
             "name": "ide_autoroute",
             "method": "POST",
             "endpoint": "/ide_autoroute",
-            "description": "Two modes. (1) Intent: pass `task` string — auto-retrieves context. Optional: session_id, max_tokens, single_file_fast_path, reference_only. (2) Action: pass `action` + `action_input`. Actions: debug_failure, generate_tests, apply_tests, analyze_pipeline, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, generate_evolution_plan, organization_graph, service_graph, plan_org_refactor, semantic_middleware_get, semantic_middleware_set, workspace_mode_get, workspace_mode_set (enabled:bool), env_check, ab_test_dev, llm_tools."
+            "description": "Start here for every task. Two modes. (1) Task mode: pass `task` (natural language) + `session_id` — auto-detects intent, assembles minimal budgeted context, deduplicates spans already seen this session. Use for all code tasks before reaching for retrieve. (2) Action mode: pass `action` + `action_input` for specific operations: semantic_middleware_set (call once per session with {enabled:true,session_id:\"<id>\"} to activate deduplication), debug_failure, generate_tests, apply_tests, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, env_check, ab_test_dev."
         }
     ]);
-    Json(serde_json::json!({"ok": true, "tools": primary}))
+    // Recommended execution order (call in this sequence for minimal token cost and correct context):
+    // 1. ide_autoroute  action=semantic_middleware_set  {enabled:true, session_id:"<stable-id>"}  — activate session dedup (once per session)
+    // 2. ide_autoroute  task="<your task description>"  session_id="<stable-id>"                  — get oriented, auto-planned context
+    // 3. retrieve        operation=PlanSafeEdit  name="<symbol>"  edit_description="<what>"        — scope edit impact before writing any code
+    // 4. retrieve        operation=GetPlannedContext / SearchSymbol / GetCodeSpan                  — targeted lookups as needed
+    // IMPORTANT: if retrieve.GetPerformanceStats shows files_parse_failed > 0, check
+    //   indexing.last_parse_fail_paths — those files are absent from the index and the LLM
+    //   will not receive context for them. Read those files directly before editing them.
+    Json(serde_json::json!({"ok": true, "tools": primary, "workflow": {
+        "steps": [
+            {"step": 1, "tool": "ide_autoroute", "call": {"action": "semantic_middleware_set", "action_input": {"enabled": true, "session_id": "<stable-id>"}}, "note": "Once per session. Activates context deduplication — prevents re-sending spans the LLM already has."},
+            {"step": 2, "tool": "ide_autoroute", "call": {"task": "<describe task in plain english>", "session_id": "<stable-id>"}, "note": "For every task. Auto-plans retrieval, returns minimal budgeted context. Check response.indexing.files_parse_failed — if > 0, read those files directly."},
+            {"step": 3, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>"}, "note": "Before writing any code. Returns impact scope, affected files, and required context bundle. Skip only for trivial single-symbol edits with no callers."},
+            {"step": 4, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<stable-id>"}, "note": "Targeted follow-up only. Use when step 2 context is insufficient for a specific symbol."}
+        ],
+        "anti_patterns": [
+            "Do NOT call retrieve before ide_autoroute — you will over-fetch without intent detection.",
+            "Do NOT omit session_id — without it, every call re-sends already-seen context.",
+            "Do NOT skip PlanSafeEdit for multi-file edits — you will miss callers and break dependents.",
+            "Do NOT use GetCodeSpan for orientation — use GetProjectSummary or ide_autoroute(task) first."
+        ]
+    }}))
 }
 
 fn resolve_tool_request(

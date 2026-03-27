@@ -190,7 +190,7 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
-const SESSION_TTL_SECS: u64 = 20 * 60;
+const SESSION_TTL_SECS: u64 = 60 * 60; // 1 hour — extended from 20 min to cover long dev sessions
 const MAX_SESSION_CONTEXT_ENTRIES: usize = 200;
 
 fn now_epoch_s() -> u64 {

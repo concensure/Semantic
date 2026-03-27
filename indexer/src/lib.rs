@@ -22,6 +22,10 @@ struct IndexerPerfStats {
     files_indexed: u64,
     files_skipped: u64,
     files_deleted: u64,
+    files_parse_failed: u64,
+    files_read_failed: u64,
+    #[serde(default)]
+    last_parse_fail_paths: Vec<String>,
     total_repo_ms: u128,
     total_update_ms: u128,
     max_repo_ms: u128,
@@ -87,7 +91,11 @@ impl Indexer {
             // Read the actual file but store under the prefixed path.
             let content = match fs::read_to_string(full_path) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("[semantic] read failed: {rel_raw} — {e}");
+                    self.perf_stats.files_read_failed += 1;
+                    continue;
+                }
             };
             let checksum = checksum(&content);
             if let Some(existing) = self.storage.get_file_checksum(&rel)? {
@@ -98,7 +106,14 @@ impl Indexer {
             }
             let parsed = match self.parser.parse(&rel_raw, &content) {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("[semantic] parse failed: {rel_raw} — {e}");
+                    self.perf_stats.files_parse_failed += 1;
+                    if self.perf_stats.last_parse_fail_paths.len() < 20 {
+                        self.perf_stats.last_parse_fail_paths.push(rel_raw.clone());
+                    }
+                    continue;
+                }
             };
             // Re-prefix symbol file references.
             let prefixed_symbols: Vec<engine::SymbolRecord> = parsed.symbols.iter().map(|s| {
@@ -336,6 +351,9 @@ impl Indexer {
             "files_indexed": self.perf_stats.files_indexed,
             "files_skipped": self.perf_stats.files_skipped,
             "files_deleted": self.perf_stats.files_deleted,
+            "files_parse_failed": self.perf_stats.files_parse_failed,
+            "files_read_failed": self.perf_stats.files_read_failed,
+            "last_parse_fail_paths": self.perf_stats.last_parse_fail_paths,
             "last_repo_ms": self.perf_stats.last_repo_ms,
             "last_update_ms": self.perf_stats.last_update_ms,
             "max_repo_ms": self.perf_stats.max_repo_ms,

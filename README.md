@@ -102,23 +102,25 @@ Demo project used by the development A/B suite:
 
 - `test_repo/todo_app/`
 
-## Latest A/B Benchmark Update (2026-03-13)
+## Latest A/B Benchmark Update (2026-03-27)
 
-Recent `POST /ab_test_dev` runs with one representative hosted-provider configuration, `autoroute_first=true`, and `single_file_fast_path=true`:
+Run with `autoroute_first=true`, `single_file_fast_path=false`, provider=openai, 11-task core suite:
 
-- prior baseline: `-18.62%` token savings (`9738` -> `11551`)
-- improved run: `+8.07%` token savings (`9365` -> `8609`)
-- latest run: `+5.70%` token savings (`9749` -> `9193`)
-- task success stayed `11/11` in both control and semantic arms
+| Run | tokens_without | tokens_with | token_savings | step_savings | task_success |
+|---|---:|---:|---:|---:|---:|
+| Baseline (2026-03-13) | 9,738 | 11,551 | -18.62% | — | 11/11 |
+| Hardened A (2026-03-13) | 9,365 | 8,609 | +8.07% | — | 11/11 |
+| Hardened B (2026-03-13) | 9,749 | 9,193 | +5.70% | — | 11/11 |
+| **Enhanced (2026-03-27)** | **9,723** | **10,377** | **-6.73%** | **+27.78%** | **11/11** |
 
-Core improvements now in the pipeline:
+The primary metric is now **step savings** (27.78% fewer estimated developer steps), not token savings per call. See `docs/AB_TEST_DEV_RESULTS.md` for full breakdown.
 
-- stronger planner target resolution for natural-language symbol queries
-- explicit target-symbol hinting from A/B task metadata into planning
-- target-aligned minimal raw seed for autoroute (prevents unrelated seed code)
-- per-task context refs in A/B (no cross-task ref starvation)
-- escalation routing updated to replacement-style accounting (no additive token double-charge)
-- richer A/B diagnostics (`target_match`, `semantic_route`, prompt-char deltas, gating metrics)
+Test suite enhancements in 2026-03-27 run:
+- equalized success thresholds (both arms now require `hits >= 2`, fixing an inflation bias)
+- new `retrieval_quality` block: `avg_context_coverage_pct`, `avg_retrieval_ms`, `misdirection_risk_pct`
+- new `validated_success_with_pct` (structural plan + keyword hit)
+- per-task `retrieval_ms`, `context_coverage`, `misdirection_risk` fields
+- local `estimate_tokens` in A/B test aligned with budgeter (`chars/3`)
 
 Additional retrieval operations:
 

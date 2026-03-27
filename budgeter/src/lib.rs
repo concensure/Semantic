@@ -24,7 +24,11 @@ pub struct ContextItem {
 }
 
 pub fn estimate_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
+    // Use chars/3 rather than chars/4 to add a ~25% safety margin.
+    // Code tokens (Rust/TypeScript generics, punctuation, short identifiers)
+    // average ~3 chars each, so chars/4 consistently underestimates and causes
+    // the budget to select more items than actually fit in the context window.
+    text.chars().count().div_ceil(3)
 }
 
 pub fn select_with_budget(mut items: Vec<ContextItem>, budget: &ContextBudget) -> Vec<ContextItem> {
@@ -59,8 +63,10 @@ mod tests {
 
     #[test]
     fn token_estimation_is_stable() {
-        assert_eq!(estimate_tokens("abcd"), 1);
-        assert_eq!(estimate_tokens("abcdefgh"), 2);
+        // chars/3 with div_ceil: 4 chars → 2, 6 chars → 2, 9 chars → 3
+        assert_eq!(estimate_tokens("abcd"), 2);
+        assert_eq!(estimate_tokens("abcdef"), 2);
+        assert_eq!(estimate_tokens("abcdefghi"), 3);
     }
 
     #[test]

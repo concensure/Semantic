@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 use anyhow::{anyhow, Result};
 use budgeter::{select_with_budget, ContextBudget, ContextItem};
 use engine::{
@@ -1041,6 +1042,12 @@ impl RetrievalService {
         let mut escalation_attempts = 0usize;
         let mut escalation_guardrail_skips = 0usize;
         let mut runtime_trim_applied = 0usize;
+        // New counters for enhanced metrics
+        let mut validated_success_with_count = 0usize;
+        let mut total_context_coverage = 0usize;
+        let mut total_expected_terms = 0usize;
+        let mut total_retrieval_ms = 0u128;
+        let mut misdirection_risk_tasks = 0usize;
 
         for task in tasks {
             let semantic_exec = self
@@ -1078,6 +1085,7 @@ impl RetrievalService {
                 "{}::{}::autoroute={}::target={}",
                 task.semantic_query, max_tokens, autoroute_first, task.target_symbol
             );
+            let retrieval_start = std::time::Instant::now();
             let semantic_context = if let Some(cached) = context_cache.get(&cache_key) {
                 context_cache_hits += 1;
                 cached.clone()
@@ -1105,6 +1113,8 @@ impl RetrievalService {
                 context_cache.insert(cache_key, fresh.clone());
                 fresh
             };
+            let retrieval_ms = retrieval_start.elapsed().as_millis();
+            total_retrieval_ms += retrieval_ms;
             let impacted_file_count = semantic_exec
                 .as_ref()
                 .and_then(|v| v.get("edit_plan"))
@@ -1125,6 +1135,33 @@ impl RetrievalService {
             let delta_refs = refs.clone();
             if delta_refs.is_empty() {
                 empty_ref_tasks += 1;
+            }
+            // Context coverage: score expected_terms against fetched context text BEFORE the LLM
+            // call. This is a retrieval quality signal independent of LLM output — it answers
+            // "did semantic actually fetch code containing the relevant symbols?"
+            let context_text: String = semantic_context
+                .get("context")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.get("code").and_then(|c| c.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            let context_coverage = score_expected_terms(&context_text, &task.expected_terms);
+            let context_coverage_pct = if task.expected_terms.is_empty() {
+                100.0f32
+            } else {
+                (context_coverage as f32 / task.expected_terms.len() as f32) * 100.0
+            };
+            total_context_coverage += context_coverage;
+            total_expected_terms += task.expected_terms.len();
+            // Misdirection risk: semantic returned no context refs for a task that needs code change.
+            // The LLM will be sent only the bare feature request — high risk of wrong output.
+            let misdirection_risk = delta_refs.is_empty() && task.requires_code_change;
+            if misdirection_risk {
+                misdirection_risk_tasks += 1;
             }
             let planned_target_symbol = semantic_context
                 .get("symbol")
@@ -1361,17 +1398,26 @@ impl RetrievalService {
             } else {
                 ((a_tokens as f32 - b_tokens_final as f32) / a_tokens as f32) * 100.0
             };
-            if a_hits > 0 {
+            // Equalized thresholds: both arms require 2+ expected-term hits for "success".
+            // Previously control needed >= 2 but semantic only needed >= 1 (+ validation_passed),
+            // which inflated semantic success rates. Now both use the same 2-hit bar.
+            let success_without = a_hits >= 2;
+            let success_with = b_hits >= 2;
+            // validated_with: semantic bonus criterion — structural plan succeeded AND 1+ hit.
+            // Tracked separately so the apples-to-apples comparison stays clean.
+            let validated_with = semantic_exec.is_some() && validation_passed && b_hits >= 1;
+            if success_without {
                 total_success_without += 1;
             }
-            if b_hits > 0 {
+            if success_with {
                 total_success_with += 1;
+            }
+            if validated_with {
+                validated_success_with_count += 1;
             }
 
             total_without += a_tokens;
             total_with += b_tokens_final;
-            let success_without = a_hits >= 2;
-            let success_with = semantic_exec.is_some() && validation_passed && b_hits >= 1;
             if let Some(steps) = estimate_steps_without_semantic(success_without, &a_output) {
                 total_steps_without += steps;
                 step_success_without += 1;
@@ -1418,8 +1464,13 @@ impl RetrievalService {
                 "reused_context_count": 0usize,
                 "success_without_semantic": success_without,
                 "success_with_semantic": success_with,
+                "validated_success_with_semantic": validated_with,
                 "validation_passed": validation_passed,
-                "tests_passed": tests_passed
+                "tests_passed": tests_passed,
+                "context_coverage": context_coverage,
+                "context_coverage_pct": context_coverage_pct,
+                "retrieval_ms": retrieval_ms,
+                "misdirection_risk": misdirection_risk
             });
             append_ab_test_task_metrics(&self.repo_root, &tracking_row)?;
 
@@ -1472,8 +1523,13 @@ impl RetrievalService {
                 "estimated_steps_with_semantic": estimate_steps_with_semantic(success_with, impacted_file_count.max(1), b_hits),
                 "success_without_semantic": success_without,
                 "success_with_semantic": success_with,
+                "validated_success_with_semantic": validated_with,
                 "validation_passed": validation_passed,
                 "tests_passed": tests_passed,
+                "context_coverage": context_coverage,
+                "context_coverage_pct": context_coverage_pct,
+                "retrieval_ms": retrieval_ms,
+                "misdirection_risk": misdirection_risk,
                 "semantic_execution": semantic_exec.unwrap_or_else(|| json!({"ok": false, "error": "plan_safe_edit failed"})),
             }));
         }
@@ -1504,6 +1560,18 @@ impl RetrievalService {
         let escalation_guardrail_skip_pct =
             (escalation_guardrail_skips as f32 / task_count_f) * 100.0;
         let runtime_trim_applied_pct = (runtime_trim_applied as f32 / task_count_f) * 100.0;
+        let validated_success_pct = (validated_success_with_count as f32 / task_count_f) * 100.0;
+        let avg_context_coverage_pct = if total_expected_terms == 0 {
+            0.0f32
+        } else {
+            (total_context_coverage as f32 / total_expected_terms as f32) * 100.0
+        };
+        let avg_retrieval_ms = if task_count == 0 {
+            0u128
+        } else {
+            total_retrieval_ms / task_count as u128
+        };
+        let misdirection_risk_pct = (misdirection_risk_tasks as f32 / task_count_f) * 100.0;
 
         append_ab_test_csv(
             &self.repo_root,
@@ -1549,8 +1617,17 @@ impl RetrievalService {
             "semantic_execution_success_pct": semantic_exec_pct,
             "validation_success_count": validation_success,
             "validation_success_pct": validation_success_pct,
+            "validated_success_with_count": validated_success_with_count,
+            "validated_success_with_pct": validated_success_pct,
             "tests_success_count": tests_success,
             "tests_success_pct": tests_success_pct,
+            "retrieval_quality": {
+                "avg_context_coverage_pct": avg_context_coverage_pct,
+                "avg_retrieval_ms": avg_retrieval_ms,
+                "misdirection_risk_tasks": misdirection_risk_tasks,
+                "misdirection_risk_pct": misdirection_risk_pct,
+                "note": "context_coverage measures % of expected terms present in fetched context before LLM call — pure retrieval quality, LLM-independent"
+            },
             "gating_metrics": {
                 "target_match_count": target_match_count,
                 "target_match_pct": target_match_pct,
@@ -2144,8 +2221,11 @@ impl RetrievalService {
 
         let mut context_items = Vec::new();
         let estimated_text = |start: usize, end: usize| -> String {
+            // 40 chars/line is a realistic average for Rust/TypeScript code
+            // (was 14, which underestimated by ~3×, causing the budget to select
+            // more items than actually fit once real code was read).
             let span_lines = end.saturating_sub(start).saturating_add(1);
-            let approx_chars = (span_lines.saturating_mul(14)).clamp(80, 1600);
+            let approx_chars = (span_lines.saturating_mul(40)).clamp(120, 4000);
             "x".repeat(approx_chars)
         };
         context_items.push(ContextItem {
@@ -3753,7 +3833,10 @@ fn default_key_env_for_provider(provider: &str) -> Option<&'static str> {
 }
 
 fn estimate_tokens(text: &str) -> usize {
-    ((text.len() as f32) / 4.0).ceil() as usize
+    // Match budgeter: chars/3 with 25% safety margin for code tokens.
+    // Using chars/4 previously caused prompts to be under-counted, allowing
+    // the guardrail to pass prompts that actually exceeded the token budget.
+    ((text.len() as f32) / 3.0).ceil() as usize
 }
 
 fn operation_category(operation: &Operation) -> &'static str {
