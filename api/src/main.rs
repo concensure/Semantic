@@ -1,11 +1,6 @@
 use anyhow::Result;
 use axum::{
-    extract::Query,
-    extract::State,
-    response::Html,
-    routing::get,
-    routing::patch,
-    routing::post,
+    extract::Query, extract::State, response::Html, routing::get, routing::patch, routing::post,
     Json, Router,
 };
 use change_propagation::ChangePropagationEngine;
@@ -63,11 +58,18 @@ impl WorkspaceState {
             let mut in_paths = false;
             for line in raw.lines() {
                 let t = line.trim();
-                if t == "paths = [" || t == "paths=[" { in_paths = true; continue; }
+                if t == "paths = [" || t == "paths=[" {
+                    in_paths = true;
+                    continue;
+                }
                 if in_paths {
-                    if t == "]" { break; }
+                    if t == "]" {
+                        break;
+                    }
                     let p = t.trim_matches(',').trim().trim_matches('"');
-                    if p.is_empty() { continue; }
+                    if p.is_empty() {
+                        continue;
+                    }
                     let resolved = if std::path::Path::new(p).is_absolute() {
                         std::path::PathBuf::from(p)
                     } else {
@@ -142,7 +144,10 @@ async fn main() -> Result<()> {
     indexer.index_repo(&repo_root)?;
 
     let retrieval_storage = storage::Storage::open(&db_path, &tantivy_path)?;
-    let retrieval_service = Arc::new(Mutex::new(RetrievalService::new(repo_root.clone(), retrieval_storage)));
+    let retrieval_service = Arc::new(Mutex::new(RetrievalService::new(
+        repo_root.clone(),
+        retrieval_storage,
+    )));
 
     let shared_indexer = Arc::new(Mutex::new(indexer));
     let _watcher = RepoWatcher::start(repo_root.clone(), shared_indexer)?;
@@ -273,7 +278,11 @@ fn now_epoch_s() -> u64 {
         .unwrap_or_default()
 }
 
-fn next_task_scope(telemetry: &TelemetrySink, session_id: Option<&str>, route_id: &str) -> TaskScope {
+fn next_task_scope(
+    telemetry: &TelemetrySink,
+    session_id: Option<&str>,
+    route_id: &str,
+) -> TaskScope {
     TaskScope {
         session_id: session_id.map(|v| v.to_string()),
         task_id: telemetry.next_event_id("task"),
@@ -299,7 +308,10 @@ fn emit_task_finished(
     category: &str,
     response: &serde_json::Value,
 ) {
-    let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ok = response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let mut event = telemetry.event(
         Some(scope),
         if ok { "task_completed" } else { "task_failed" },
@@ -372,7 +384,10 @@ fn apply_session_context_reuse(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        let start = item.get("start").and_then(|v| v.as_u64()).unwrap_or_default();
+        let start = item
+            .get("start")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default();
         let end = item.get("end").and_then(|v| v.as_u64()).unwrap_or_default();
         let key = format!("{file}:{start}-{end}");
         if file.is_empty() || start == 0 || end == 0 {
@@ -419,10 +434,16 @@ async fn retrieve(
         metadata_pairs([
             ("operation", serde_json::json!(body.request.operation)),
             ("session_id", serde_json::json!(body.session_id)),
-            ("single_file_fast_path", serde_json::json!(body.single_file_fast_path)),
+            (
+                "single_file_fast_path",
+                serde_json::json!(body.single_file_fast_path),
+            ),
             ("reference_only", serde_json::json!(body.reference_only)),
             ("mapping_mode", serde_json::json!(body.mapping_mode)),
-            ("max_footprint_items", serde_json::json!(body.max_footprint_items)),
+            (
+                "max_footprint_items",
+                serde_json::json!(body.max_footprint_items),
+            ),
         ]),
     );
 
@@ -713,7 +734,8 @@ async fn ide_autoroute(
     // #1/#6: Auto-generate a session ID if the caller didn't provide one.
     // Uses nanosecond timestamp for sufficient uniqueness without an extra crate.
     // Echoed in every response so callers can reuse it across calls.
-    let effective_session_id: String = body.session_id
+    let effective_session_id: String = body
+        .session_id
         .as_deref()
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
@@ -1688,7 +1710,8 @@ fn build_minimal_raw_seed(
         edit_description: None,
         patch_mode: None,
         run_tests: None,
-        workspace_mode: None, ..Default::default()
+        workspace_mode: None,
+        ..Default::default()
     };
     let result = state.retrieval.lock().handle(req).ok()?;
     Some(serde_json::json!({
@@ -1728,7 +1751,8 @@ fn build_low_confidence_raw_context(
             edit_description: None,
             patch_mode: None,
             run_tests: None,
-            workspace_mode: None, ..Default::default()
+            workspace_mode: None,
+            ..Default::default()
         };
         let res = state.retrieval.lock().handle(req).ok()?;
         out.push(serde_json::json!({
@@ -2215,11 +2239,10 @@ async fn generate_tests(
     State(state): State<AppState>,
     Json(body): Json<GenerateTestsRequest>,
 ) -> Json<serde_json::Value> {
-    match state
-        .retrieval
-        .lock()
-        .generate_tests(&body.target_symbol, &body.framework.unwrap_or_else(|| "rust-test".to_string()))
-    {
+    match state.retrieval.lock().generate_tests(
+        &body.target_symbol,
+        &body.framework.unwrap_or_else(|| "rust-test".to_string()),
+    ) {
         Ok(result) => Json(serde_json::json!({"ok": true, "result": result})),
         Err(err) => Json(serde_json::json!({"ok": false, "error": err.to_string()})),
     }
@@ -2314,7 +2337,6 @@ async fn get_env_check(State(state): State<AppState>) -> Json<serde_json::Value>
     }))
 }
 
-
 #[derive(Debug, serde::Deserialize)]
 struct SeedTodoRequest {
     tasks: Vec<retrieval::TodoTask>,
@@ -2358,16 +2380,14 @@ async fn run_ab_test_dev(
     let scenario = body.scenario;
     let retrieval = state.retrieval.clone();
     let result = tokio::task::spawn_blocking(move || {
-        retrieval
-            .lock()
-            .run_ab_test_dev(
-                feature_request.as_deref(),
-                provider,
-                max_context_tokens,
-                single_file_fast_path,
-                autoroute_first,
-                scenario.as_deref(),
-            )
+        retrieval.lock().run_ab_test_dev(
+            feature_request.as_deref(),
+            provider,
+            max_context_tokens,
+            single_file_fast_path,
+            autoroute_first,
+            scenario.as_deref(),
+        )
     })
     .await;
 
@@ -2386,8 +2406,6 @@ async fn get_mcp_settings_ui(State(state): State<AppState>) -> Html<String> {
         .unwrap_or_default();
     let metrics = std::fs::read_to_string(repo_root.join(".semantic").join("model_metrics.json"))
         .unwrap_or_else(|_| "{}".to_string());
-    let env_content = std::fs::read_to_string(repo_root.join(".semantic").join(".env"))
-        .unwrap_or_default();
 
     Html(format!(
         r#"<html><head><title>MCP Settings</title></head><body>
@@ -2399,16 +2417,14 @@ async fn get_mcp_settings_ui(State(state): State<AppState>) -> Html<String> {
 <textarea name="llm_routing" rows="12" cols="120">{}</textarea><br/><br/>
 <label>model_metrics.json</label><br/>
 <textarea name="model_metrics" rows="10" cols="120">{}</textarea><br/><br/>
-<label>.env (API keys)</label><br/>
-<textarea name="env_file" rows="10" cols="120">{}</textarea><br/><br/>
-<label><input type="checkbox" name="enable_ollama" value="true"/>Enable Ollama</label><br/><br/>
+<p>Secrets are intentionally not shown here. Configure API keys and local bridge credentials through environment variables or private local files only.</p>
+<label><input type="checkbox" name="enable_ollama" value="true"/>Add Ollama placeholder</label><br/><br/>
 <button type="submit">Save</button>
 </form>
 </body></html>"#,
         html_escape(&llm_cfg),
         html_escape(&routing_cfg),
-        html_escape(&metrics),
-        html_escape(&env_content)
+        html_escape(&metrics)
     ))
 }
 
@@ -2417,7 +2433,6 @@ struct MCPSettingsUpdate {
     llm_config: String,
     llm_routing: String,
     model_metrics: String,
-    env_file: String,
     enable_ollama: Option<String>,
 }
 
@@ -2432,16 +2447,18 @@ async fn update_mcp_settings(
     let mut llm_config = body.llm_config;
     if body.enable_ollama.is_some() && !llm_config.contains("ollama") {
         llm_config.push_str(
-            "\n[providers]\nollama = \"http://127.0.0.1:11434\"\n\n[provider_settings.ollama]\nmodel = \"llama3.1:8b\"\n",
+            "\n[providers]\nollama = \"<OLLAMA_BASE_URL>\"\n\n[provider_settings.ollama]\nmodel = \"<OLLAMA_MODEL>\"\n",
         );
     }
 
     let _ = std::fs::write(semantic_dir.join("llm_config.toml"), llm_config);
     let _ = std::fs::write(semantic_dir.join("llm_routing.toml"), body.llm_routing);
     let _ = std::fs::write(semantic_dir.join("model_metrics.json"), body.model_metrics);
-    let _ = std::fs::write(semantic_dir.join(".env"), body.env_file);
 
-    Html("<html><body><h3>Saved.</h3><a href=\"/mcp_settings_ui\">Back</a></body></html>".to_string())
+    Html(
+        "<html><body><h3>Saved.</h3><a href=\"/mcp_settings_ui\">Back</a></body></html>"
+            .to_string(),
+    )
 }
 
 fn html_escape(input: &str) -> String {
@@ -2496,4 +2513,3 @@ fn success(response: RetrievalResponse) -> serde_json::Value {
         "result": response.result,
     })
 }
-

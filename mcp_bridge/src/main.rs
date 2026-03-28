@@ -32,9 +32,10 @@ struct MCPToolResult {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let semantic_base_url =
-        std::env::var("SEMANTIC_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
-    let bridge_token = std::env::var("MCP_BRIDGE_TOKEN").unwrap_or_else(|_| "change-me".to_string());
+    let semantic_base_url = std::env::var("SEMANTIC_BASE_URL")
+        .map_err(|_| anyhow::anyhow!("SEMANTIC_BASE_URL must be set for mcp_bridge"))?;
+    let bridge_token = std::env::var("MCP_BRIDGE_TOKEN")
+        .map_err(|_| anyhow::anyhow!("MCP_BRIDGE_TOKEN must be set for mcp_bridge"))?;
 
     let state = Arc::new(AppState {
         semantic_base_url,
@@ -98,11 +99,7 @@ async fn call_tool(
                     let query = params
                         .iter()
                         .map(|(k, v)| {
-                            format!(
-                                "{}={}",
-                                urlencoding::encode(k),
-                                urlencoding::encode(v)
-                            )
+                            format!("{}={}", urlencoding::encode(k), urlencoding::encode(v))
                         })
                         .collect::<Vec<_>>()
                         .join("&");
@@ -179,33 +176,35 @@ async fn list_tools() -> Json<serde_json::Value> {
             "description": "Predict cross-module impact diffusion. Send {\"operation\": \"GetChangePropagation\", \"name\": \"<origin_repo>\"}."
         }
     ]);
-    Json(serde_json::json!({"ok": true, "tools": primary, "workflow": {
-        "steps": [
-            {"step": 1, "tool": "ide_autoroute", "call": {"task": "<describe task in plain english>"}, "note": "Always first. session_id is auto-generated if omitted — save response.session_id and reuse it. Intent is auto-detected: debug/refactor/implement/understand each get a different token budget, retrieval strategy, and response shape."},
-            {"step": 2, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>", "session_id": "<from step 1 response>"}, "note": "Before writing any code that touches more than one function. Returns impact scope and affected files."},
-            {"step": 3, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<from step 1 response>"}, "note": "Targeted follow-up only when step-1 context is insufficient."}
-        ],
-        "intent_behaviour": {
-            "debug":     "budget=1600, hybrid context, root_cause_candidates, impact_scope",
-            "refactor":  "budget=2000, GetHybridRankedContext, impact_scope",
-            "implement": "budget=1400, GetPlannedContext, impact_scope",
-            "understand":"budget=800, reference_only=false (inline code)"
-        },
-        "auto_features": [
-            "session_id auto-generated — echo response.session_id on next call.",
-            "Project summary auto-injected on first call per session for repos >= 50 files.",
-            "recommended_provider/endpoint set by llm_router when configured.",
-            "impact_scope pre-computed (no exploratory tool calls needed).",
-            "knowledge_hints injected from KnowledgeGraph.",
-            "Test files suppressed when symbol already has coverage (understand/debug)."
-        ],
-        "anti_patterns": [
-            "Do NOT call retrieve before ide_autoroute — you will over-fetch without intent detection.",
-            "Do NOT discard response.session_id — losing it resets deduplication.",
-            "Do NOT skip PlanSafeEdit for multi-file edits.",
-            "Do NOT call GetCodeSpan for spans already inlined in response.result.context[*].code_span."
-        ]
-    }}))
+    Json(
+        serde_json::json!({"ok": true, "tools": primary, "workflow": {
+            "steps": [
+                {"step": 1, "tool": "ide_autoroute", "call": {"task": "<describe task in plain english>"}, "note": "Always first. session_id is auto-generated if omitted — save response.session_id and reuse it. Intent is auto-detected: debug/refactor/implement/understand each get a different token budget, retrieval strategy, and response shape."},
+                {"step": 2, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>", "session_id": "<from step 1 response>"}, "note": "Before writing any code that touches more than one function. Returns impact scope and affected files."},
+                {"step": 3, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<from step 1 response>"}, "note": "Targeted follow-up only when step-1 context is insufficient."}
+            ],
+            "intent_behaviour": {
+                "debug":     "budget=1600, hybrid context, root_cause_candidates, impact_scope",
+                "refactor":  "budget=2000, GetHybridRankedContext, impact_scope",
+                "implement": "budget=1400, GetPlannedContext, impact_scope",
+                "understand":"budget=800, reference_only=false (inline code)"
+            },
+            "auto_features": [
+                "session_id auto-generated — echo response.session_id on next call.",
+                "Project summary auto-injected on first call per session for repos >= 50 files.",
+                "recommended_provider/endpoint set by llm_router when configured.",
+                "impact_scope pre-computed (no exploratory tool calls needed).",
+                "knowledge_hints injected from KnowledgeGraph.",
+                "Test files suppressed when symbol already has coverage (understand/debug)."
+            ],
+            "anti_patterns": [
+                "Do NOT call retrieve before ide_autoroute — you will over-fetch without intent detection.",
+                "Do NOT discard response.session_id — losing it resets deduplication.",
+                "Do NOT skip PlanSafeEdit for multi-file edits.",
+                "Do NOT call GetCodeSpan for spans already inlined in response.result.context[*].code_span."
+            ]
+        }}),
+    )
 }
 
 fn resolve_tool_request(
@@ -367,6 +366,9 @@ mod tests {
                 .expect("resolve");
         assert_eq!(endpoint, "/ide_autoroute");
         let payload = payload.expect("payload");
-        assert_eq!(payload.get("action").and_then(|v| v.as_str()), Some("patch_memory"));
+        assert_eq!(
+            payload.get("action").and_then(|v| v.as_str()),
+            Some("patch_memory")
+        );
     }
 }

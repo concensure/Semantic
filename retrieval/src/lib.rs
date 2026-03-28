@@ -158,7 +158,12 @@ enum MappingMode {
 
 impl MappingMode {
     fn parse(raw: Option<&str>) -> Self {
-        match raw.unwrap_or("footprint_first").trim().to_lowercase().as_str() {
+        match raw
+            .unwrap_or("footprint_first")
+            .trim()
+            .to_lowercase()
+            .as_str()
+        {
             "legacy_full" => Self::LegacyFull,
             _ => Self::FootprintFirst,
         }
@@ -221,14 +226,16 @@ impl RetrievalService {
         };
         for (cache_key, entry) in entries {
             let value_json = serde_json::to_string(&entry.value).ok();
-            let _ = self.storage.upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
-                cache_key,
-                cache_kind: "planned_context".to_string(),
-                value_json,
-                prompt_text: None,
-                cached_at_epoch_s: entry.cached_at_epoch_s,
-                source_revision: entry.source_revision,
-            });
+            let _ = self
+                .storage
+                .upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
+                    cache_key,
+                    cache_kind: "planned_context".to_string(),
+                    value_json,
+                    prompt_text: None,
+                    cached_at_epoch_s: entry.cached_at_epoch_s,
+                    source_revision: entry.source_revision,
+                });
         }
         let _ = fs::remove_file(path);
     }
@@ -308,219 +315,223 @@ impl RetrievalService {
             event.status = Some("started".to_string());
             event
         });
-        let result: Result<serde_json::Value> = (|| -> Result<serde_json::Value> { Ok(match operation {
-            Operation::GetRepoMap => self.get_repo_map()?,
-            Operation::GetFileOutline => {
-                let file = request.file.ok_or_else(|| anyhow!("file is required"))?;
-                self.get_file_outline(&file)?
-            }
-            Operation::SearchSymbol => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                self.search_symbol(&name, request.limit.unwrap_or(20))?
-            }
-            Operation::GetFunction => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                self.get_symbol_span(&name, SymbolType::Function)?
-            }
-            Operation::GetClass => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                self.get_symbol_span(&name, SymbolType::Class)?
-            }
-            Operation::GetDependencies => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                self.get_dependencies(&name)?
-            }
-            Operation::GetCodeSpan => {
-                let file = request.file.ok_or_else(|| anyhow!("file is required"))?;
-                let start = request
-                    .start_line
-                    .ok_or_else(|| anyhow!("start_line is required"))?;
-                let end = request
-                    .end_line
-                    .ok_or_else(|| anyhow!("end_line is required"))?;
-                self.get_code_span(&file, start, end)?
-            }
-            Operation::GetLogicNodes => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                self.get_logic_nodes(&name)?
-            }
-            Operation::GetLogicNeighborhood => {
-                let node_id = request
-                    .node_id
-                    .ok_or_else(|| anyhow!("node_id is required"))?;
-                self.get_logic_neighborhood(node_id, request.radius.unwrap_or(1))?
-            }
-            Operation::GetLogicSpan => {
-                let node_id = request
-                    .node_id
-                    .ok_or_else(|| anyhow!("node_id is required"))?;
-                self.get_logic_span(node_id)?
-            }
-            Operation::GetDependencyNeighborhood => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                let radius = request
-                    .radius
-                    .ok_or_else(|| anyhow!("radius is required"))?;
-                self.get_dependency_neighborhood(&name, radius)?
-            }
-            Operation::GetSymbolNeighborhood => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                let radius = request
-                    .radius
-                    .ok_or_else(|| anyhow!("radius is required"))?;
-                self.get_symbol_neighborhood(&name, radius)?
-            }
-            Operation::GetReasoningContext => {
-                let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
-                let logic_radius = request
-                    .logic_radius
-                    .ok_or_else(|| anyhow!("logic_radius is required"))?;
-                let dependency_radius = request
-                    .dependency_radius
-                    .ok_or_else(|| anyhow!("dependency_radius is required"))?;
-                self.get_reasoning_context(&name, logic_radius, dependency_radius)?
-            }
-            Operation::GetPlannedContext => {
-                let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
-                let requested_max_tokens = request
-                    .max_tokens
-                    .ok_or_else(|| anyhow!("max_tokens is required"))?;
-                let max_tokens =
-                    clamp_tokens_for_operation(&self.repo_root, "plan", requested_max_tokens);
-                self.get_planned_context(
-                    &query,
-                    max_tokens,
-                    single_file_fast_path.unwrap_or(false),
-                    include_raw_code_override,
-                    None,
-                    mapping_mode,
-                    max_footprint_items,
-                )?
-            }
-            Operation::GetRepoMapHierarchy => self.get_repo_map_hierarchy()?,
-            Operation::GetModuleDependencies => self.get_module_dependencies()?,
-            Operation::SearchSemanticSymbol => {
-                let query = request
-                    .query
-                    .or(request.name)
-                    .ok_or_else(|| anyhow!("query or name is required"))?;
-                self.search_semantic_symbol(&query, request.limit.unwrap_or(20))?
-            }
-            Operation::GetWorkspaceReasoningContext => {
-                let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
-                let requested_max_tokens = request
-                    .max_tokens
-                    .ok_or_else(|| anyhow!("max_tokens is required"))?;
-                let max_tokens =
-                    clamp_tokens_for_operation(&self.repo_root, "lookup", requested_max_tokens);
-                self.get_workspace_reasoning_context(
-                    &query,
-                    max_tokens,
-                    request.workspace_scope.unwrap_or_default(),
-                    single_file_fast_path.unwrap_or(false),
-                    include_raw_code_override,
-                    mapping_mode,
-                    max_footprint_items,
-                )?
-            }
-            Operation::PlanSafeEdit => {
-                let symbol = request
-                    .name
-                    .or(request.query)
-                    .ok_or_else(|| anyhow!("name or query(symbol) is required"))?;
-                let edit_description = request
-                    .edit_description
-                    .ok_or_else(|| anyhow!("edit_description is required"))?;
-                let max_tokens = clamp_tokens_for_operation(
-                    &self.repo_root,
-                    "edit",
-                    request.max_tokens.unwrap_or(4000),
-                );
-                self.plan_safe_edit(
-                    &symbol,
-                    &edit_description,
-                    max_tokens,
-                    request.patch_mode,
-                    request.run_tests.unwrap_or(false),
-                )?
-            }
-            // These operations are intercepted by the API layer before reaching the retrieval
-            // service. They are listed here only to satisfy exhaustive pattern matching.
-            Operation::SetWorkspaceMode | Operation::GetWorkspaceMode => {
-                json!({ "note": "workspace mode is managed by the API layer, not the retrieval service" })
-            }
-            Operation::GetProjectSummary => {
-                json!({ "note": "project summary is handled by the API layer" })
-            }
-            Operation::GetErrorContext => {
-                let kind = request.error_kind.as_deref().unwrap_or("");
-                let msg = request.error_message.as_deref().unwrap_or("");
-                self.get_error_context(kind, msg)?
-            }
-            Operation::RecordError => {
-                let kind = request.error_kind.as_deref().unwrap_or("");
-                let msg = request.error_message.as_deref().unwrap_or("");
-                let file_hint = request.file.as_deref();
-                let symbol_hint = request.name.as_deref();
-                self.record_error(kind, msg, file_hint, symbol_hint)?
-            }
-            Operation::RecordSolution => {
-                let pattern_id = request.pattern_id.unwrap_or(0);
-                let solution = request.solution.as_deref().unwrap_or("");
-                let outcome = request.outcome.as_deref().unwrap_or("resolved");
-                let token_cost = request.token_cost.unwrap_or(0);
-                self.record_solution(pattern_id, solution, outcome, token_cost)?
-            }
-            Operation::GetControlFlowHints => {
-                let symbol = request.name.or(request.query).unwrap_or_default();
-                self.get_control_flow_hints(&symbol)?
-            }
-            Operation::GetDataFlowHints => {
-                let symbol = request.name.or(request.query).unwrap_or_default();
-                self.get_data_flow_hints(&symbol)?
-            }
-            Operation::GetControlFlowSlice => {
-                let symbol = request.name.or(request.query).unwrap_or_default();
-                self.get_control_flow_slice(&symbol)?
-            }
-            Operation::GetDataFlowSlice => {
-                let symbol = request.name.or(request.query).unwrap_or_default();
-                self.get_data_flow_slice(&symbol)?
-            }
-            Operation::GetLogicClusters => {
-                let symbol = request.name.or(request.query).unwrap_or_default();
-                self.get_logic_clusters(&symbol)?
-            }
-            Operation::GetHybridRankedContext => {
-                let query = request.query.unwrap_or_default();
-                let max_tokens =
-                    clamp_tokens_for_operation(&self.repo_root, "lookup", request.max_tokens.unwrap_or(1400));
-                self.get_hybrid_ranked_context(
-                    &query,
-                    max_tokens,
-                    single_file_fast_path.unwrap_or(true),
-                )?
-            }
-            Operation::GetDebugGraph => self.get_debug_graph()?,
-            Operation::GetPipelineGraph => self.get_pipeline_graph()?,
-            Operation::GetRootCauseCandidates => self.get_root_cause_candidates()?,
-            Operation::GetTestGaps => self.get_test_gaps()?,
-            Operation::GetDeploymentHistory => self.get_deployment_history()?,
-            Operation::GetPerformanceStats => self.get_performance_stats(),
-            Operation::GetKnowledgeGraph | Operation::AppendKnowledge | Operation::GetChangePropagation => {
-                anyhow::bail!("add-on operation must be dispatched at the API layer")
-            }
-        }) })();
+        let result: Result<serde_json::Value> = (|| -> Result<serde_json::Value> {
+            Ok(match operation {
+                Operation::GetRepoMap => self.get_repo_map()?,
+                Operation::GetFileOutline => {
+                    let file = request.file.ok_or_else(|| anyhow!("file is required"))?;
+                    self.get_file_outline(&file)?
+                }
+                Operation::SearchSymbol => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    self.search_symbol(&name, request.limit.unwrap_or(20))?
+                }
+                Operation::GetFunction => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    self.get_symbol_span(&name, SymbolType::Function)?
+                }
+                Operation::GetClass => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    self.get_symbol_span(&name, SymbolType::Class)?
+                }
+                Operation::GetDependencies => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    self.get_dependencies(&name)?
+                }
+                Operation::GetCodeSpan => {
+                    let file = request.file.ok_or_else(|| anyhow!("file is required"))?;
+                    let start = request
+                        .start_line
+                        .ok_or_else(|| anyhow!("start_line is required"))?;
+                    let end = request
+                        .end_line
+                        .ok_or_else(|| anyhow!("end_line is required"))?;
+                    self.get_code_span(&file, start, end)?
+                }
+                Operation::GetLogicNodes => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    self.get_logic_nodes(&name)?
+                }
+                Operation::GetLogicNeighborhood => {
+                    let node_id = request
+                        .node_id
+                        .ok_or_else(|| anyhow!("node_id is required"))?;
+                    self.get_logic_neighborhood(node_id, request.radius.unwrap_or(1))?
+                }
+                Operation::GetLogicSpan => {
+                    let node_id = request
+                        .node_id
+                        .ok_or_else(|| anyhow!("node_id is required"))?;
+                    self.get_logic_span(node_id)?
+                }
+                Operation::GetDependencyNeighborhood => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    let radius = request
+                        .radius
+                        .ok_or_else(|| anyhow!("radius is required"))?;
+                    self.get_dependency_neighborhood(&name, radius)?
+                }
+                Operation::GetSymbolNeighborhood => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    let radius = request
+                        .radius
+                        .ok_or_else(|| anyhow!("radius is required"))?;
+                    self.get_symbol_neighborhood(&name, radius)?
+                }
+                Operation::GetReasoningContext => {
+                    let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
+                    let logic_radius = request
+                        .logic_radius
+                        .ok_or_else(|| anyhow!("logic_radius is required"))?;
+                    let dependency_radius = request
+                        .dependency_radius
+                        .ok_or_else(|| anyhow!("dependency_radius is required"))?;
+                    self.get_reasoning_context(&name, logic_radius, dependency_radius)?
+                }
+                Operation::GetPlannedContext => {
+                    let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
+                    let requested_max_tokens = request
+                        .max_tokens
+                        .ok_or_else(|| anyhow!("max_tokens is required"))?;
+                    let max_tokens =
+                        clamp_tokens_for_operation(&self.repo_root, "plan", requested_max_tokens);
+                    self.get_planned_context(
+                        &query,
+                        max_tokens,
+                        single_file_fast_path.unwrap_or(false),
+                        include_raw_code_override,
+                        None,
+                        mapping_mode,
+                        max_footprint_items,
+                    )?
+                }
+                Operation::GetRepoMapHierarchy => self.get_repo_map_hierarchy()?,
+                Operation::GetModuleDependencies => self.get_module_dependencies()?,
+                Operation::SearchSemanticSymbol => {
+                    let query = request
+                        .query
+                        .or(request.name)
+                        .ok_or_else(|| anyhow!("query or name is required"))?;
+                    self.search_semantic_symbol(&query, request.limit.unwrap_or(20))?
+                }
+                Operation::GetWorkspaceReasoningContext => {
+                    let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
+                    let requested_max_tokens = request
+                        .max_tokens
+                        .ok_or_else(|| anyhow!("max_tokens is required"))?;
+                    let max_tokens =
+                        clamp_tokens_for_operation(&self.repo_root, "lookup", requested_max_tokens);
+                    self.get_workspace_reasoning_context(
+                        &query,
+                        max_tokens,
+                        request.workspace_scope.unwrap_or_default(),
+                        single_file_fast_path.unwrap_or(false),
+                        include_raw_code_override,
+                        mapping_mode,
+                        max_footprint_items,
+                    )?
+                }
+                Operation::PlanSafeEdit => {
+                    let symbol = request
+                        .name
+                        .or(request.query)
+                        .ok_or_else(|| anyhow!("name or query(symbol) is required"))?;
+                    let edit_description = request
+                        .edit_description
+                        .ok_or_else(|| anyhow!("edit_description is required"))?;
+                    let max_tokens = clamp_tokens_for_operation(
+                        &self.repo_root,
+                        "edit",
+                        request.max_tokens.unwrap_or(4000),
+                    );
+                    self.plan_safe_edit(
+                        &symbol,
+                        &edit_description,
+                        max_tokens,
+                        request.patch_mode,
+                        request.run_tests.unwrap_or(false),
+                    )?
+                }
+                // These operations are intercepted by the API layer before reaching the retrieval
+                // service. They are listed here only to satisfy exhaustive pattern matching.
+                Operation::SetWorkspaceMode | Operation::GetWorkspaceMode => {
+                    json!({ "note": "workspace mode is managed by the API layer, not the retrieval service" })
+                }
+                Operation::GetProjectSummary => {
+                    json!({ "note": "project summary is handled by the API layer" })
+                }
+                Operation::GetErrorContext => {
+                    let kind = request.error_kind.as_deref().unwrap_or("");
+                    let msg = request.error_message.as_deref().unwrap_or("");
+                    self.get_error_context(kind, msg)?
+                }
+                Operation::RecordError => {
+                    let kind = request.error_kind.as_deref().unwrap_or("");
+                    let msg = request.error_message.as_deref().unwrap_or("");
+                    let file_hint = request.file.as_deref();
+                    let symbol_hint = request.name.as_deref();
+                    self.record_error(kind, msg, file_hint, symbol_hint)?
+                }
+                Operation::RecordSolution => {
+                    let pattern_id = request.pattern_id.unwrap_or(0);
+                    let solution = request.solution.as_deref().unwrap_or("");
+                    let outcome = request.outcome.as_deref().unwrap_or("resolved");
+                    let token_cost = request.token_cost.unwrap_or(0);
+                    self.record_solution(pattern_id, solution, outcome, token_cost)?
+                }
+                Operation::GetControlFlowHints => {
+                    let symbol = request.name.or(request.query).unwrap_or_default();
+                    self.get_control_flow_hints(&symbol)?
+                }
+                Operation::GetDataFlowHints => {
+                    let symbol = request.name.or(request.query).unwrap_or_default();
+                    self.get_data_flow_hints(&symbol)?
+                }
+                Operation::GetControlFlowSlice => {
+                    let symbol = request.name.or(request.query).unwrap_or_default();
+                    self.get_control_flow_slice(&symbol)?
+                }
+                Operation::GetDataFlowSlice => {
+                    let symbol = request.name.or(request.query).unwrap_or_default();
+                    self.get_data_flow_slice(&symbol)?
+                }
+                Operation::GetLogicClusters => {
+                    let symbol = request.name.or(request.query).unwrap_or_default();
+                    self.get_logic_clusters(&symbol)?
+                }
+                Operation::GetHybridRankedContext => {
+                    let query = request.query.unwrap_or_default();
+                    let max_tokens = clamp_tokens_for_operation(
+                        &self.repo_root,
+                        "lookup",
+                        request.max_tokens.unwrap_or(1400),
+                    );
+                    self.get_hybrid_ranked_context(
+                        &query,
+                        max_tokens,
+                        single_file_fast_path.unwrap_or(true),
+                    )?
+                }
+                Operation::GetDebugGraph => self.get_debug_graph()?,
+                Operation::GetPipelineGraph => self.get_pipeline_graph()?,
+                Operation::GetRootCauseCandidates => self.get_root_cause_candidates()?,
+                Operation::GetTestGaps => self.get_test_gaps()?,
+                Operation::GetDeploymentHistory => self.get_deployment_history()?,
+                Operation::GetPerformanceStats => self.get_performance_stats(),
+                Operation::GetKnowledgeGraph
+                | Operation::AppendKnowledge
+                | Operation::GetChangePropagation => {
+                    anyhow::bail!("add-on operation must be dispatched at the API layer")
+                }
+            })
+        })();
         let elapsed_ms = started.elapsed().as_millis();
         self.record_operation_perf(&op_name, elapsed_ms);
 
         match result {
             Ok(result) => {
-                let completion_metadata = task_summary_metadata(
-                    &op_name,
-                    true,
-                    summarize_result(&result),
-                );
+                let completion_metadata =
+                    task_summary_metadata(&op_name, true, summarize_result(&result));
                 emit_current(|sink, scope| {
                     let mut event = sink.event(
                         Some(scope),
@@ -985,11 +996,8 @@ impl RetrievalService {
         };
         let requested_feature = feature_request.unwrap_or("todo app end-to-end suite");
         let policy = load_retrieval_policy(&self.repo_root);
-        let max_tokens = clamp_tokens_for_operation(
-            &self.repo_root,
-            "plan",
-            max_context_tokens.unwrap_or(1800),
-        );
+        let max_tokens =
+            clamp_tokens_for_operation(&self.repo_root, "plan", max_context_tokens.unwrap_or(1800));
         let task_count = tasks.len();
 
         let routing_cfg =
@@ -1702,7 +1710,8 @@ impl RetrievalService {
         // emit telemetry event if token_tracking is enabled
         if outcome == "resolved" {
             emit_current(|sink, scope| {
-                let mut event = sink.event(Some(scope), "error_resolved", "error_log", Some("debug"));
+                let mut event =
+                    sink.event(Some(scope), "error_resolved", "error_log", Some("debug"));
                 event.metadata = sink.sanitize_metadata(serde_json::json!({
                     "pattern_id": pattern_id,
                     "token_cost": token_cost,
@@ -2366,7 +2375,10 @@ impl RetrievalService {
         let selected = select_with_budget(context_items, &budget);
 
         let mut raw_budget_chars = max_tokens.saturating_mul(4).saturating_sub(1600).max(800);
-        if policy.anti_bloat_small_task && single_file_fast_path && file_count < policy.small_repo_file_threshold {
+        if policy.anti_bloat_small_task
+            && single_file_fast_path
+            && file_count < policy.small_repo_file_threshold
+        {
             raw_budget_chars = raw_budget_chars.min(900);
         }
         let assembled: Vec<serde_json::Value> = selected
@@ -2612,24 +2624,30 @@ impl RetrievalService {
             .get("control_flow_edges")
             .and_then(|v| v.as_array())
             .map(|edges| {
-                edges.iter().filter(|edge| {
-                    edge.get("kind")
-                        .and_then(|v| v.as_str())
-                        .map(|kind| kind == "Branch")
-                        .unwrap_or(false)
-                }).count()
+                edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.get("kind")
+                            .and_then(|v| v.as_str())
+                            .map(|kind| kind == "Branch")
+                            .unwrap_or(false)
+                    })
+                    .count()
             })
             .unwrap_or_default();
         let loop_like = slice
             .get("control_flow_edges")
             .and_then(|v| v.as_array())
             .map(|edges| {
-                edges.iter().filter(|edge| {
-                    edge.get("kind")
-                        .and_then(|v| v.as_str())
-                        .map(|kind| kind == "LoopBack")
-                        .unwrap_or(false)
-                }).count()
+                edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.get("kind")
+                            .and_then(|v| v.as_str())
+                            .map(|kind| kind == "LoopBack")
+                            .unwrap_or(false)
+                    })
+                    .count()
             })
             .unwrap_or_default();
         let mut out = slice;
@@ -2680,17 +2698,34 @@ impl RetrievalService {
         let assignments = out
             .get("data_flow_edges")
             .and_then(|v| v.as_array())
-            .map(|edges| edges.iter().filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("AssignmentToUse")).count())
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("AssignmentToUse"))
+                    .count()
+            })
             .unwrap_or_default();
         let returns = out
             .get("data_flow_edges")
             .and_then(|v| v.as_array())
-            .map(|edges| edges.iter().filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("AssignmentToReturn")).count())
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|e| {
+                        e.get("kind").and_then(|v| v.as_str()) == Some("AssignmentToReturn")
+                    })
+                    .count()
+            })
             .unwrap_or_default();
         let calls = out
             .get("data_flow_edges")
             .and_then(|v| v.as_array())
-            .map(|edges| edges.iter().filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("CallResult")).count())
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("CallResult"))
+                    .count()
+            })
             .unwrap_or_default();
         if let Some(obj) = out.as_object_mut() {
             obj.insert(
@@ -2744,16 +2779,15 @@ impl RetrievalService {
         max_tokens: usize,
         single_file_fast_path: bool,
     ) -> Result<serde_json::Value> {
-        let planned =
-            self.get_planned_context(
-                query,
-                max_tokens,
-                single_file_fast_path,
-                Some(false),
-                None,
-                Some("footprint_first"),
-                Some(120),
-            )?;
+        let planned = self.get_planned_context(
+            query,
+            max_tokens,
+            single_file_fast_path,
+            Some(false),
+            None,
+            Some("footprint_first"),
+            Some(120),
+        )?;
         let symbol = planned
             .get("symbol")
             .and_then(|v| v.as_str())
@@ -2780,7 +2814,12 @@ impl RetrievalService {
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()
-            .filter_map(|_| control.get("file").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|_| {
+                control
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         let control_edge_count = control
             .get("control_flow_edges")
@@ -2903,14 +2942,16 @@ impl RetrievalService {
             .unwrap_or_default();
         let source_revision = current_index_revision(&self.repo_root);
         let serialized = serde_json::to_string(&value).ok();
-        let _ = self.storage.upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
-            cache_key: key,
-            cache_kind: "planned_context".to_string(),
-            value_json: serialized,
-            prompt_text: None,
-            cached_at_epoch_s: now,
-            source_revision,
-        });
+        let _ = self
+            .storage
+            .upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
+                cache_key: key,
+                cache_kind: "planned_context".to_string(),
+                value_json: serialized,
+                prompt_text: None,
+                cached_at_epoch_s: now,
+                source_revision,
+            });
         let evicted = self
             .storage
             .prune_retrieval_cache_kind("planned_context", max_entries)
@@ -2988,8 +3029,8 @@ impl RetrievalService {
         refs: &[serde_json::Value],
         count: usize,
     ) -> String {
-        let refs_key = serde_json::to_string(&refs.iter().take(count).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let refs_key =
+            serde_json::to_string(&refs.iter().take(count).collect::<Vec<_>>()).unwrap_or_default();
         let key = format!("v1::{count}::{refs_key}::{base_prompt}");
         if let Some(prompt) = self.try_get_prompt_fragment(&key, 1800) {
             let mut perf = self.perf_stats.lock().expect("perf lock");
@@ -3158,17 +3199,30 @@ impl RetrievalService {
             llm_router::LLMRouter::from_files(&providers_cfg, &routing_cfg, &merged_metrics)?;
         let route = router.route(llm_router::LLMTask::CodeExecution);
         let provider_settings = parse_provider_settings(&providers_cfg);
+        let target_symbol = self
+            .storage
+            .get_symbol_any(symbol)?
+            .ok_or_else(|| anyhow!("symbol not found: {symbol}"))?;
+        let symbol_code = read_span(
+            &self.repo_root,
+            &target_symbol.file,
+            target_symbol.start_line,
+            target_symbol.end_line,
+        )?;
+        let prompt = build_safe_edit_prompt(
+            &plan,
+            &impact,
+            &target_symbol,
+            edit_description,
+            &symbol_code,
+        );
         let live_llm_result = route.as_ref().and_then(|selected| {
-            let prompt = format!(
-                "You are editing symbol '{}'.\nFailure/Task: {}\nReturn concise fix guidance.",
-                symbol, edit_description
-            );
             call_live_llm(
                 &selected.provider,
                 provider_settings.get(&selected.provider),
                 Some(&selected.endpoint),
                 &prompt,
-                512,
+                max_tokens.min(1400),
             )
         });
 
@@ -3177,25 +3231,36 @@ impl RetrievalService {
             .first()
             .map(|c| c.file_path.clone())
             .unwrap_or_default();
-        let patch = patch_engine::PatchEngine::generate_ast_patch(
-            &file_path,
-            &plan.target_symbol,
-            engine::ASTTransformation::ReplaceFunctionBody,
-        );
+        let existing_code = if file_path.is_empty() {
+            String::new()
+        } else {
+            fs::read_to_string(self.repo_root.join(&file_path)).unwrap_or_default()
+        };
+        let transform = edit_type_to_transform(&plan.edit_type);
+        let patch = build_safe_edit_patch(
+            &plan,
+            &target_symbol,
+            edit_description,
+            &existing_code,
+            live_llm_result.as_ref().map(|v| v.text.as_str()),
+            transform.clone(),
+        )?;
         let preview_diff = match &patch.representation {
             engine::PatchRepresentation::ASTTransform(ast_edit) => {
                 patch_engine::PatchEngine::ast_to_diff(&patch.file_path, ast_edit)
             }
             engine::PatchRepresentation::UnifiedDiff(diff) => diff.clone(),
         };
-        let existing_code = if file_path.is_empty() {
-            String::new()
-        } else {
-            fs::read_to_string(self.repo_root.join(&file_path)).unwrap_or_default()
-        };
         let validation_result =
             patch_engine::PatchEngine::validate_patch(&file_path, &patch, &existing_code);
         let validation_passed = validation_result.is_ok();
+        let applied = matches!(patch_mode, Some(engine::PatchApplicationMode::AutoApply))
+            && validation_passed
+            && !file_path.is_empty();
+        if applied {
+            let updated = patch_engine::PatchEngine::apply_patch(&existing_code, &patch)?;
+            fs::write(self.repo_root.join(&file_path), updated)?;
+        }
         let test_result = if run_tests {
             run_repo_tests(&self.repo_root)
         } else {
@@ -3221,12 +3286,7 @@ impl RetrievalService {
                 (r.provider.clone(), model)
             })
             .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        let ast_transform = match &patch.representation {
-            engine::PatchRepresentation::ASTTransform(ast_edit) => {
-                Some(ast_edit.transformation.clone())
-            }
-            engine::PatchRepresentation::UnifiedDiff(_) => None,
-        };
+        let ast_transform = Some(transform.clone());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -3266,6 +3326,7 @@ impl RetrievalService {
                 "response_text": r.text,
             })),
             "patch_application_mode": application_mode,
+            "patch_applied": applied,
             "run_tests": run_tests,
             "max_tokens": max_tokens,
             "validation_config": validation_cfg,
@@ -3333,6 +3394,193 @@ fn sort_symbols(symbols: &mut [SymbolRecord]) {
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.id.unwrap_or_default().cmp(&b.id.unwrap_or_default()))
     });
+}
+
+fn edit_type_to_transform(edit_type: &engine::EditType) -> engine::ASTTransformation {
+    match edit_type {
+        engine::EditType::RenameSymbol => engine::ASTTransformation::RenameSymbol,
+        engine::EditType::ChangeSignature => engine::ASTTransformation::ChangeSignature,
+        engine::EditType::RefactorFunction | engine::EditType::ModifyLogic => {
+            engine::ASTTransformation::ReplaceFunctionBody
+        }
+    }
+}
+
+fn build_safe_edit_prompt(
+    plan: &engine::EditPlan,
+    impact: &engine::ImpactReport,
+    target_symbol: &SymbolRecord,
+    edit_description: &str,
+    symbol_code: &str,
+) -> String {
+    let impacted = if plan.impacted_symbols.is_empty() {
+        "none".to_string()
+    } else {
+        plan.impacted_symbols.join(", ")
+    };
+    format!(
+        concat!(
+            "You are preparing a concrete code edit.\n",
+            "Return JSON only with keys: replacement_code, summary.\n",
+            "replacement_code must contain the full updated definition for the target symbol only.\n",
+            "Do not include markdown fences.\n\n",
+            "Target symbol: {symbol}\n",
+            "Language: {language}\n",
+            "File: {file}\n",
+            "Edit type: {edit_type:?}\n",
+            "Requested change: {edit_description}\n",
+            "Impacted symbols: {impacted}\n",
+            "Impacted files: {impacted_files}\n\n",
+            "Current code:\n{symbol_code}\n"
+        ),
+        symbol = plan.target_symbol,
+        language = target_symbol.language,
+        file = target_symbol.file,
+        edit_type = plan.edit_type,
+        edit_description = edit_description,
+        impacted = impacted,
+        impacted_files = impact.impacted_files.join(", "),
+        symbol_code = symbol_code
+    )
+}
+
+fn build_safe_edit_patch(
+    plan: &engine::EditPlan,
+    target_symbol: &SymbolRecord,
+    edit_description: &str,
+    existing_code: &str,
+    llm_response_text: Option<&str>,
+    fallback_transform: engine::ASTTransformation,
+) -> Result<engine::CodePatch> {
+    if let Some(replacement_code) = llm_response_text.and_then(extract_replacement_code) {
+        return patch_engine::PatchEngine::generate_replacement_patch(
+            &target_symbol.file,
+            existing_code,
+            patch_engine::LineRange {
+                start_line: target_symbol.start_line as usize,
+                end_line: target_symbol.end_line as usize,
+            },
+            &replacement_code,
+        );
+    }
+
+    if plan.edit_type == engine::EditType::RenameSymbol {
+        if let Some(new_name) = extract_rename_target(edit_description, &plan.target_symbol) {
+            let renamed = replace_identifier_tokens(existing_code, &plan.target_symbol, &new_name);
+            return patch_engine::PatchEngine::generate_replacement_patch(
+                &target_symbol.file,
+                existing_code,
+                patch_engine::LineRange {
+                    start_line: 1,
+                    end_line: existing_code.lines().count().max(1),
+                },
+                &renamed,
+            );
+        }
+    }
+
+    Ok(patch_engine::PatchEngine::generate_ast_patch(
+        &target_symbol.file,
+        &plan.target_symbol,
+        fallback_transform,
+    ))
+}
+
+fn extract_replacement_code(response_text: &str) -> Option<String> {
+    let trimmed = response_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(code) = value.get("replacement_code").and_then(|v| v.as_str()) {
+                let code = code.trim();
+                if !code.is_empty() {
+                    return Some(code.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(start) = trimmed.find("```") {
+        let after_ticks = &trimmed[start + 3..];
+        let body_start = after_ticks.find('\n').map(|idx| idx + 1).unwrap_or(0);
+        let body = &after_ticks[body_start..];
+        if let Some(end) = body.find("```") {
+            let code = body[..end].trim();
+            if !code.is_empty() {
+                return Some(code.to_string());
+            }
+        }
+    }
+
+    if looks_like_symbol_code(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+fn looks_like_symbol_code(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    text.contains('{')
+        || lower.contains("function ")
+        || lower.contains("def ")
+        || lower.contains("class ")
+        || lower.contains("export ")
+}
+
+fn extract_rename_target(edit_description: &str, original_name: &str) -> Option<String> {
+    let lowered = edit_description.to_ascii_lowercase();
+    let needle = " to ";
+    let to_idx = lowered.rfind(needle)?;
+    let candidate = edit_description[to_idx + needle.len()..]
+        .split_whitespace()
+        .next()
+        .map(sanitize_identifier)?;
+    if candidate.is_empty() || candidate == original_name {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
+        .collect()
+}
+
+fn replace_identifier_tokens(input: &str, old: &str, new: &str) -> String {
+    let mut out = String::with_capacity(input.len() + new.len());
+    let mut cursor = 0usize;
+
+    while let Some(relative_match) = input[cursor..].find(old) {
+        let start = cursor + relative_match;
+        let end = start + old.len();
+        let prev = input[..start].chars().next_back();
+        let next = input[end..].chars().next();
+        if !prev.map(is_identifier_char).unwrap_or(false)
+            && !next.map(is_identifier_char).unwrap_or(false)
+        {
+            out.push_str(&input[cursor..start]);
+            out.push_str(new);
+            cursor = end;
+        } else if let Some(ch) = input[cursor..].chars().next() {
+            out.push(ch);
+            cursor += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    out.push_str(&input[cursor..]);
+    out
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
 }
 
 fn sort_logic_nodes(nodes: &mut [LogicNodeRecord]) {
@@ -3520,7 +3768,12 @@ fn call_live_llm_with_diagnostics(
     let started = Instant::now();
     let prompt_estimated = telemetry::estimate_tokens(prompt);
     emit_current(|sink, scope| {
-        let mut event = sink.event(Some(scope), "llm_request", "retrieval", Some("code_generation"));
+        let mut event = sink.event(
+            Some(scope),
+            "llm_request",
+            "retrieval",
+            Some("code_generation"),
+        );
         event.provider = Some(provider.to_string());
         event.model = Some(setting.model.clone());
         event.status = Some("started".to_string());
@@ -3558,7 +3811,12 @@ fn call_live_llm_with_diagnostics(
     let elapsed_ms = started.elapsed().as_millis();
     match &result {
         Ok(value) => emit_current(|sink, scope| {
-            let mut event = sink.event(Some(scope), "llm_response", "retrieval", Some("code_generation"));
+            let mut event = sink.event(
+                Some(scope),
+                "llm_response",
+                "retrieval",
+                Some("code_generation"),
+            );
             event.provider = Some(provider.to_string());
             event.model = Some(value.model.clone());
             event.status = Some("ok".to_string());
@@ -3576,7 +3834,12 @@ fn call_live_llm_with_diagnostics(
             event
         }),
         Err(error) => emit_current(|sink, scope| {
-            let mut event = sink.event(Some(scope), "llm_response", "retrieval", Some("wasted_calls"));
+            let mut event = sink.event(
+                Some(scope),
+                "llm_response",
+                "retrieval",
+                Some("wasted_calls"),
+            );
             event.provider = Some(provider.to_string());
             event.model = Some(setting.model.clone());
             event.status = Some("error".to_string());
@@ -3871,7 +4134,10 @@ fn summarize_result(result: &serde_json::Value) -> Vec<(&'static str, serde_json
         .get("references")
         .and_then(|v| v.as_array())
         .map(|items| items.len());
-    let symbol = result.get("symbol").and_then(|v| v.as_str()).map(|v| v.to_string());
+    let symbol = result
+        .get("symbol")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
     let reusable = result.get("reused_context_count").cloned();
     let mut fields = vec![
         ("context_count", json!(context_count)),
@@ -4956,9 +5222,18 @@ fn build_observability_alerts(
         }));
     }
     for op in op_stats {
-        let name = op.get("operation").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let p95 = op.get("p95_ms").and_then(|v| v.as_u64()).unwrap_or_default() as u128;
-        let p99 = op.get("p99_ms").and_then(|v| v.as_u64()).unwrap_or_default() as u128;
+        let name = op
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let p95 = op
+            .get("p95_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default() as u128;
+        let p99 = op
+            .get("p99_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default() as u128;
         if p95 > policy.p95_latency_alert_ms {
             alerts.push(json!({
                 "severity": "warning",
@@ -5074,7 +5349,7 @@ fn read_span(
 
 #[cfg(test)]
 mod tests {
-    use super::RetrievalService;
+    use super::{extract_replacement_code, RetrievalService};
     use engine::{
         LogicNodeRecord, LogicNodeType, Operation, RetrievalRequest, SymbolRecord, SymbolType,
     };
@@ -6078,5 +6353,124 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(!repos.is_empty());
+    }
+
+    #[test]
+    fn extracts_replacement_code_from_json_response() {
+        let response = r#"{"replacement_code":"function retryRequest(){\n  return 2;\n}","summary":"updated"}"#;
+        let extracted = extract_replacement_code(response).expect("replacement code");
+        assert!(extracted.contains("return 2"));
+    }
+
+    #[test]
+    fn plan_safe_edit_generates_concrete_rename_patch_without_llm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".semantic")).expect("mkdir semantic");
+        fs::create_dir_all(repo.join("src")).expect("mkdir src");
+        fs::write(
+            repo.join("src").join("client.ts"),
+            "function fetchData(){ return retryRequest(); }\nfunction retryRequest(){ return 1; }\n",
+        )
+        .expect("write file");
+        fs::write(
+            repo.join(".semantic").join("llm_config.toml"),
+            "[providers]\nprimary = \"<disabled>\"\n",
+        )
+        .expect("write llm config");
+        fs::write(
+            repo.join(".semantic").join("llm_routing.toml"),
+            "[execution]\npreferred = [\"primary\"]\n",
+        )
+        .expect("write llm routing");
+        fs::write(repo.join(".semantic").join("model_metrics.json"), "{}").expect("write metrics");
+
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let mut storage = Storage::open(&db, &idx).expect("open storage");
+        storage
+            .replace_file_index(
+                0,
+                "src/client.ts",
+                "typescript",
+                "x",
+                &[
+                    SymbolRecord {
+                        id: None,
+                        repo_id: 0,
+                        name: "fetchData".into(),
+                        symbol_type: SymbolType::Function,
+                        file: "src/client.ts".into(),
+                        start_line: 1,
+                        end_line: 1,
+                        language: "typescript".into(),
+                        summary: "Function fetchData".into(),
+                        signature: None,
+                    },
+                    SymbolRecord {
+                        id: None,
+                        repo_id: 0,
+                        name: "retryRequest".into(),
+                        symbol_type: SymbolType::Function,
+                        file: "src/client.ts".into(),
+                        start_line: 2,
+                        end_line: 2,
+                        language: "typescript".into(),
+                        summary: "Function retryRequest".into(),
+                        signature: None,
+                    },
+                ],
+                &[engine::DependencyRecord {
+                    id: None,
+                    repo_id: 0,
+                    caller_symbol: "fetchData".into(),
+                    callee_symbol: "retryRequest".into(),
+                    file: "src/client.ts".into(),
+                }],
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .expect("replace");
+
+        let service = RetrievalService::new(repo, storage);
+        let response = service
+            .handle(RetrievalRequest {
+                operation: Operation::PlanSafeEdit,
+                name: Some("retryRequest".into()),
+                query: None,
+                file: None,
+                start_line: None,
+                end_line: None,
+                max_tokens: Some(800),
+                workspace_scope: None,
+                limit: None,
+                node_id: None,
+                radius: None,
+                logic_radius: None,
+                dependency_radius: None,
+                edit_description: Some("rename retryRequest to retryWithBackoff".into()),
+                patch_mode: Some(engine::PatchApplicationMode::PreviewOnly),
+                run_tests: Some(false),
+                ..Default::default()
+            })
+            .expect("plan safe edit");
+
+        let diff = response
+            .result
+            .get("patch_preview")
+            .and_then(|v| v.get("diff"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(diff.contains("retryWithBackoff"));
+        assert_eq!(
+            response
+                .result
+                .get("validation_result")
+                .and_then(|v| v.get("passed"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }

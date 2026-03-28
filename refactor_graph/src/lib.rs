@@ -127,11 +127,8 @@ impl RefactorGraph {
     }
 
     pub fn topological_order(&self) -> Result<Vec<RefactorNode>> {
-        let mut indegree: HashMap<String, usize> = self
-            .nodes
-            .iter()
-            .map(|n| (n.id.clone(), 0usize))
-            .collect();
+        let mut indegree: HashMap<String, usize> =
+            self.nodes.iter().map(|n| (n.id.clone(), 0usize)).collect();
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
 
         for node in &self.nodes {
@@ -142,7 +139,10 @@ impl RefactorGraph {
                 if let Some(in_deg) = indegree.get_mut(&node.id) {
                     *in_deg += 1;
                 }
-                adjacency.entry(dep.clone()).or_default().push(node.id.clone());
+                adjacency
+                    .entry(dep.clone())
+                    .or_default()
+                    .push(node.id.clone());
             }
         }
 
@@ -278,14 +278,12 @@ impl RefactorExecutor {
 
     pub fn rollback(&mut self, refactor_id: &str) -> Result<()> {
         let snapshot_root = self.repo_root.join(SNAPSHOT_DIR).join(refactor_id);
-        let files = self
-            .snapshots
-            .get(refactor_id)
-            .cloned()
-            .unwrap_or_default();
+        let files = self.snapshots.get(refactor_id).cloned().unwrap_or_default();
 
         for original_file in files {
-            let relative = original_file.strip_prefix(&self.repo_root).unwrap_or(&original_file);
+            let relative = original_file
+                .strip_prefix(&self.repo_root)
+                .unwrap_or(&original_file);
             let snapshot = snapshot_root.join(relative);
             if snapshot.exists() {
                 if let Some(parent) = original_file.parent() {
@@ -324,20 +322,6 @@ impl RefactorExecutor {
         self.snapshot_file(refactor_id, &target_file)?;
         let existing = fs::read_to_string(&target_file).unwrap_or_default();
 
-        let transform = edit_type_to_transform(&node.edit_plan.edit_type);
-        let patch = patch_engine::PatchEngine::generate_ast_patch(
-            &target_file_rel,
-            &node.target_symbol,
-            transform.clone(),
-        );
-        patch_engine::PatchEngine::validate_patch(&target_file_rel, &patch, &existing)?;
-        let diff = match &patch.representation {
-            engine::PatchRepresentation::ASTTransform(edit) => {
-                patch_engine::PatchEngine::ast_to_diff(&target_file_rel, edit)
-            }
-            engine::PatchRepresentation::UnifiedDiff(v) => v.clone(),
-        };
-
         if let Some(parent) = target_file.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -350,7 +334,29 @@ impl RefactorExecutor {
             "{comment_prefix} refactor_node:{} symbol:{}\n",
             node.id, node.target_symbol
         );
-        fs::write(&target_file, format!("{existing}{patch_marker}"))?;
+        let transform = edit_type_to_transform(&node.edit_plan.edit_type);
+        let updated = format!("{existing}{patch_marker}");
+        let line_count = existing.lines().count().max(1);
+        let patch = patch_engine::PatchEngine::generate_replacement_patch(
+            &target_file_rel,
+            &existing,
+            patch_engine::LineRange {
+                start_line: 1,
+                end_line: line_count,
+            },
+            &updated,
+        )?;
+        patch_engine::PatchEngine::validate_patch(&target_file_rel, &patch, &existing)?;
+        let diff = match &patch.representation {
+            engine::PatchRepresentation::ASTTransform(edit) => {
+                patch_engine::PatchEngine::ast_to_diff(&target_file_rel, edit)
+            }
+            engine::PatchRepresentation::UnifiedDiff(v) => v.clone(),
+        };
+        fs::write(
+            &target_file,
+            patch_engine::PatchEngine::apply_patch(&existing, &patch)?,
+        )?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -446,7 +452,8 @@ pub fn execute_refactor(
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_refactor, ExecutionOptions, HighLevelRefactorRequest, RefactorExecutor, RefactorGraph,
+        execute_refactor, ExecutionOptions, HighLevelRefactorRequest, RefactorExecutor,
+        RefactorGraph,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -462,7 +469,10 @@ mod tests {
         let ordered = graph.topological_order().expect("topological");
         let ids: Vec<String> = ordered.iter().map(|n| n.id.clone()).collect();
         let pos_type = ids.iter().position(|id| id == "n_type").unwrap_or_default();
-        let pos_tests = ids.iter().position(|id| id == "n_tests").unwrap_or_default();
+        let pos_tests = ids
+            .iter()
+            .position(|id| id == "n_tests")
+            .unwrap_or_default();
         assert!(pos_type < pos_tests);
     }
 
@@ -481,13 +491,15 @@ mod tests {
             include_tests: false,
         });
         for node in &mut graph.nodes {
-            node.edit_plan.required_context.push(engine::EditContextItem {
-                file_path: "src/a.ts".to_string(),
-                start_line: 1,
-                end_line: 1,
-                priority: 0,
-                text: "ctx".to_string(),
-            });
+            node.edit_plan
+                .required_context
+                .push(engine::EditContextItem {
+                    file_path: "src/a.ts".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    priority: 0,
+                    text: "ctx".to_string(),
+                });
         }
 
         let mut executor = RefactorExecutor::new(repo.clone());
@@ -516,13 +528,15 @@ mod tests {
             include_tests: true,
         });
         for node in &mut graph.nodes {
-            node.edit_plan.required_context.push(engine::EditContextItem {
-                file_path: "src/x.ts".to_string(),
-                start_line: 1,
-                end_line: 1,
-                priority: 0,
-                text: "ctx".to_string(),
-            });
+            node.edit_plan
+                .required_context
+                .push(engine::EditContextItem {
+                    file_path: "src/x.ts".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    priority: 0,
+                    text: "ctx".to_string(),
+                });
         }
 
         let mut options = ExecutionOptions::default();
@@ -597,7 +611,11 @@ mod tests {
     fn schedules_large_graph_without_cycle() {
         let mut nodes = Vec::new();
         for i in 0..120 {
-            let dep = if i == 0 { vec![] } else { vec![format!("n{}", i - 1)] };
+            let dep = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("n{}", i - 1)]
+            };
             nodes.push(super::RefactorNode {
                 id: format!("n{i}"),
                 target_symbol: format!("S{i}"),
