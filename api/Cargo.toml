@@ -24,3 +24,10 @@ debug_graph = { path = "../debug_graph" }
 pipeline_graph = { path = "../pipeline_graph" }
 telemetry = { path = "../telemetry" }
 project_summariser = { path = "../project_summariser" }
+llm_router = { path = "../llm_router" }
+impact_analysis = { path = "../impact_analysis" }
+knowledge_graph = { path = "../knowledge_graph" }
+test_coverage = { path = "../test_coverage" }
+change_propagation = { path = "../change_propagation" }
+dependency_intelligence = { path = "../dependency_intelligence" }
+org_graph = { path = "../org_graph" }

@@ -1,0 +1,9 @@
+# LLM provider endpoints
+# Use placeholders in shared config. Set real endpoints only in local or private config.
+# Keys here must match entries in llm_routing.toml.
+[providers]
+openrouter = "<configure-endpoint>"
+anthropic = "<configure-endpoint>"
+openai = "<configure-endpoint>"
+primary = "<configure-endpoint>"
+secondary = "<configure-endpoint>"

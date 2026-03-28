@@ -357,6 +357,10 @@ pub enum Operation {
     GetErrorContext,
     RecordError,
     RecordSolution,
+    // Add-on operations
+    GetKnowledgeGraph,
+    AppendKnowledge,
+    GetChangePropagation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

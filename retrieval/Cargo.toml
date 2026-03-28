@@ -38,6 +38,7 @@ test_planner = { path = "../test_planner" }
 pipeline_graph = { path = "../pipeline_graph" }
 telemetry = { path = "../telemetry" }
 error_log = { path = "../error_log" }
+ast_cache = { path = "../ast_cache" }
 
 [dev-dependencies]
 tempfile = "3"

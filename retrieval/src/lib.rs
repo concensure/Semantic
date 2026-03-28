@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 use anyhow::{anyhow, Result};
+use ast_cache::AstCache;
 use budgeter::{select_with_budget, ContextBudget, ContextItem};
 use engine::{
     LogicNodeRecord, Operation, RetrievalRequest, RetrievalResponse, SymbolRecord, SymbolType,
@@ -22,6 +23,7 @@ pub struct RetrievalService {
     prompt_fragment_cache: Mutex<HashMap<String, CachedPrompt>>,
     perf_stats: Mutex<PerfStats>,
     telemetry: TelemetrySink,
+    ast_cache: Arc<AstCache>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +181,10 @@ impl RetrievalService {
 
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    pub fn storage_ref(&self) -> &storage::Storage {
+        &self.storage
     }
 
     pub fn index_revision(&self) -> u64 {
