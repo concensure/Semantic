@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
     language TEXT NOT NULL,
-    summary TEXT NOT NULL
+    summary TEXT NOT NULL,
+    signature TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);

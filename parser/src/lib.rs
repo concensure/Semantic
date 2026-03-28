@@ -126,6 +126,7 @@ fn collect_nodes(
 
     if is_function_node(kind) {
         if let Some(name) = extract_definition_name(node, src) {
+            let signature = extract_function_signature(node, src, &name);
             symbols.push(SymbolRecord {
                 id: None,
                 repo_id: 0,
@@ -136,6 +137,7 @@ fn collect_nodes(
                 end_line: node.end_position().row as u32 + 1,
                 language: language.to_string(),
                 summary: format!("Function {name}"),
+                signature,
             });
             let symbol_ref = symbols.len() as i64;
             collect_call_edges(node, src, file, &name, deps);
@@ -143,6 +145,7 @@ fn collect_nodes(
         }
     } else if is_class_node(kind) {
         if let Some(name) = extract_definition_name(node, src) {
+            let signature = extract_class_signature(node, src, &name);
             symbols.push(SymbolRecord {
                 id: None,
                 repo_id: 0,
@@ -153,6 +156,7 @@ fn collect_nodes(
                 end_line: node.end_position().row as u32 + 1,
                 language: language.to_string(),
                 summary: format!("Class {name}"),
+                signature,
             });
         }
     } else if is_import_node(kind) {
@@ -167,6 +171,7 @@ fn collect_nodes(
             end_line: node.end_position().row as u32 + 1,
             language: language.to_string(),
             summary: "Import statement".to_string(),
+            signature: None,
         });
     }
 
@@ -611,6 +616,31 @@ fn extract_definition_name(node: Node, src: &str) -> Option<String> {
     node.child_by_field_name("name")
         .and_then(|n| n.utf8_text(src.as_bytes()).ok())
         .map(ToString::to_string)
+}
+
+fn extract_function_signature(node: Node, src: &str, name: &str) -> Option<String> {
+    let params = node
+        .child_by_field_name("parameters")
+        .or_else(|| node.child_by_field_name("formal_parameters"))
+        .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+        .unwrap_or("()");
+    let ret = node
+        .child_by_field_name("return_type")
+        .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+        .map(|t| format!(" {t}"))
+        .unwrap_or_default();
+    Some(format!("{name}{params}{ret}"))
+}
+
+fn extract_class_signature(node: Node, src: &str, name: &str) -> Option<String> {
+    let bases = node
+        .child_by_field_name("superclasses")
+        .or_else(|| node.child_by_field_name("class_heritage"))
+        .and_then(|n| n.utf8_text(src.as_bytes()).ok());
+    match bases {
+        Some(b) if !b.trim().is_empty() => Some(format!("{name}({b})")),
+        _ => Some(name.to_string()),
+    }
 }
 
 fn extract_call_name(node: Node, src: &str) -> Option<String> {

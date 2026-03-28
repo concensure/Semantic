@@ -61,7 +61,7 @@ impl SafeEditPlanner {
                             file_path: caller.file,
                             start_line: caller.start_line as usize,
                             end_line: caller.end_line as usize,
-                            priority: 1,
+                            priority: 2,
                             text: format!("caller context for {caller_name}"),
                         });
                     }
@@ -135,6 +135,7 @@ mod tests {
                         end_line: 3,
                         language: "typescript".into(),
                         summary: "Function retryRequest".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -146,6 +147,7 @@ mod tests {
                         end_line: 9,
                         language: "typescript".into(),
                         summary: "Function fetchData".into(),
+                        signature: None,
                     },
                 ],
                 &[DependencyRecord {
@@ -155,6 +157,9 @@ mod tests {
                     callee_symbol: "retryRequest".into(),
                     file: "src/client.ts".into(),
                 }],
+                &[],
+                &[],
+                &[],
                 &[],
             )
             .expect("replace index");
@@ -188,6 +193,7 @@ mod tests {
                         end_line: 3,
                         language: "typescript".into(),
                         summary: "Function retryRequest".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -199,6 +205,7 @@ mod tests {
                         end_line: 12,
                         language: "typescript".into(),
                         summary: "Function callerA".into(),
+                        signature: None,
                     },
                 ],
                 &[DependencyRecord {
@@ -208,6 +215,9 @@ mod tests {
                     callee_symbol: "retryRequest".into(),
                     file: "src/client.ts".into(),
                 }],
+                &[],
+                &[],
+                &[],
                 &[],
             )
             .expect("replace index");

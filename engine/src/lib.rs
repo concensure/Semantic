@@ -18,6 +18,8 @@ pub struct SymbolRecord {
     pub end_line: u32,
     pub language: String,
     pub summary: String,
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

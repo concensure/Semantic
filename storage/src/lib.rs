@@ -317,8 +317,8 @@ impl Storage {
         let mut inserted_symbol_ids = Vec::with_capacity(symbols.len());
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO symbols(repo_id, name, type, file, start_line, end_line, language, summary)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO symbols(repo_id, name, type, file, start_line, end_line, language, summary, signature)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
 
             for s in symbols {
@@ -331,6 +331,7 @@ impl Storage {
                     s.end_line,
                     s.language,
                     s.summary,
+                    s.signature,
                 ])?;
                 inserted_symbol_ids.push(tx.last_insert_rowid());
             }
@@ -453,8 +454,8 @@ impl Storage {
         let mut inserted = Vec::with_capacity(symbols.len());
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO symbols(repo_id, name, type, file, start_line, end_line, language, summary)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO symbols(repo_id, name, type, file, start_line, end_line, language, summary, signature)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for s in symbols {
                 stmt.execute(params![
@@ -466,6 +467,7 @@ impl Storage {
                     s.end_line,
                     s.language,
                     s.summary,
+                    s.signature,
                 ])?;
                 inserted.push(tx.last_insert_rowid());
             }
@@ -517,7 +519,7 @@ impl Storage {
 
     pub fn list_symbols(&self) -> Result<Vec<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary FROM symbols",
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature FROM symbols",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SymbolRecord {
@@ -530,6 +532,7 @@ impl Storage {
                 end_line: row.get(6)?,
                 language: row.get(7)?,
                 summary: row.get(8)?,
+                signature: row.get(9)?,
             })
         })?;
         let collected: rusqlite::Result<Vec<_>> = rows.collect();
@@ -538,7 +541,7 @@ impl Storage {
 
     pub fn search_symbol_by_name(&self, name: &str, limit: usize) -> Result<Vec<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
              FROM symbols WHERE name LIKE ?1 ORDER BY name LIMIT ?2",
         )?;
         let pattern = format!("%{name}%");
@@ -553,6 +556,7 @@ impl Storage {
                 end_line: row.get(6)?,
                 language: row.get(7)?,
                 summary: row.get(8)?,
+                signature: row.get(9)?,
             })
         })?;
 
@@ -562,7 +566,7 @@ impl Storage {
 
     pub fn get_symbol_exact(&self, name: &str, symbol_type: SymbolType) -> Result<Option<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
              FROM symbols WHERE name = ?1 AND type = ?2 ORDER BY id DESC LIMIT 1",
         )?;
 
@@ -578,6 +582,7 @@ impl Storage {
                 end_line: row.get(6)?,
                 language: row.get(7)?,
                 summary: row.get(8)?,
+                signature: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -586,7 +591,7 @@ impl Storage {
 
     pub fn get_symbol_any(&self, name: &str) -> Result<Option<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
              FROM symbols WHERE name = ?1
              ORDER BY CASE type WHEN 'function' THEN 0 WHEN 'class' THEN 1 ELSE 2 END, id DESC
              LIMIT 1",
@@ -604,6 +609,7 @@ impl Storage {
                 end_line: row.get(6)?,
                 language: row.get(7)?,
                 summary: row.get(8)?,
+                signature: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -612,7 +618,7 @@ impl Storage {
 
     pub fn get_symbol_by_id(&self, symbol_id: i64) -> Result<Option<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
              FROM symbols WHERE id = ?1 LIMIT 1",
         )?;
         let mut rows = stmt.query(params![symbol_id])?;
@@ -627,6 +633,7 @@ impl Storage {
                 end_line: row.get(6)?,
                 language: row.get(7)?,
                 summary: row.get(8)?,
+                signature: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -635,7 +642,7 @@ impl Storage {
 
     pub fn file_outline(&self, file: &str) -> Result<Vec<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
              FROM symbols WHERE file = ?1 ORDER BY start_line",
         )?;
         let rows = stmt.query_map(params![file], |row| {
@@ -649,6 +656,7 @@ impl Storage {
                 end_line: row.get(6)?,
                 language: row.get(7)?,
                 summary: row.get(8)?,
+                signature: row.get(9)?,
             })
         })?;
 
@@ -1280,6 +1288,10 @@ fn ensure_runtime_migrations(conn: &Connection) -> Result<()> {
         "ALTER TABLE control_flow_edges ADD COLUMN variable_name TEXT",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE symbols ADD COLUMN signature TEXT",
+        [],
+    );
     Ok(())
 }
 
@@ -1547,6 +1559,7 @@ mod tests {
                 end_line: 8,
                 language: "typescript".to_string(),
                 summary: "Function retryRequest".to_string(),
+                signature: None,
             }])
             .expect("insert symbols");
 
@@ -1622,6 +1635,7 @@ mod tests {
                     end_line: 1,
                     language: "typescript".to_string(),
                     summary: "a".to_string(),
+                    signature: None,
                 },
                 SymbolRecord {
                     id: None,
@@ -1633,6 +1647,7 @@ mod tests {
                     end_line: 2,
                     language: "typescript".to_string(),
                     summary: "b".to_string(),
+                    signature: None,
                 },
                 SymbolRecord {
                     id: None,
@@ -1644,6 +1659,7 @@ mod tests {
                     end_line: 3,
                     language: "typescript".to_string(),
                     summary: "c".to_string(),
+                    signature: None,
                 },
             ])
             .expect("insert symbols");

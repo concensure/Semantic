@@ -70,6 +70,7 @@ mod tests {
                         end_line: 3,
                         language: "typescript".into(),
                         summary: "Function retryRequest".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -81,6 +82,7 @@ mod tests {
                         end_line: 9,
                         language: "typescript".into(),
                         summary: "Function fetchData".into(),
+                        signature: None,
                     },
                 ],
                 &[DependencyRecord {
@@ -90,6 +92,9 @@ mod tests {
                     callee_symbol: "retryRequest".into(),
                     file: "src/client.ts".into(),
                 }],
+                &[],
+                &[],
+                &[],
                 &[],
             )
             .expect("replace index");

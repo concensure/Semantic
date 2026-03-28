@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use telemetry::{emit_current, metadata_pairs, task_summary_metadata, TelemetrySink};
 
@@ -174,6 +174,7 @@ impl RetrievalService {
             symbol_neighborhood_cache: Mutex::new(HashMap::new()),
             prompt_fragment_cache: Mutex::new(HashMap::new()),
             perf_stats: Mutex::new(PerfStats::default()),
+            ast_cache: Arc::new(AstCache::default()),
         };
         service.migrate_legacy_planned_context_cache();
         service
@@ -506,6 +507,9 @@ impl RetrievalService {
             Operation::GetTestGaps => self.get_test_gaps()?,
             Operation::GetDeploymentHistory => self.get_deployment_history()?,
             Operation::GetPerformanceStats => self.get_performance_stats(),
+            Operation::GetKnowledgeGraph | Operation::AppendKnowledge | Operation::GetChangePropagation => {
+                anyhow::bail!("add-on operation must be dispatched at the API layer")
+            }
         }) })();
         let elapsed_ms = started.elapsed().as_millis();
         self.record_operation_perf(&op_name, elapsed_ms);
@@ -5105,6 +5109,7 @@ mod tests {
                 end_line: 3,
                 language: "typescript".into(),
                 summary: "Function retryRequest".into(),
+                signature: None,
             }])
             .expect("insert symbol");
         storage
@@ -5140,6 +5145,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("get function");
 
@@ -5181,6 +5187,7 @@ mod tests {
                     end_line: 4,
                     language: "typescript".into(),
                     summary: "Function retryRequest".into(),
+                    signature: None,
                 }],
                 &[],
                 &[
@@ -5226,6 +5233,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("logic nodes");
 
@@ -5269,6 +5277,7 @@ mod tests {
                         end_line: 1,
                         language: "typescript".into(),
                         summary: "Function a".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -5280,6 +5289,7 @@ mod tests {
                         end_line: 2,
                         language: "typescript".into(),
                         summary: "Function b".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -5291,6 +5301,7 @@ mod tests {
                         end_line: 3,
                         language: "typescript".into(),
                         summary: "Function c".into(),
+                        signature: None,
                     },
                 ],
                 &[
@@ -5375,6 +5386,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("reasoning context");
 
@@ -5426,6 +5438,7 @@ mod tests {
                         end_line: 1,
                         language: "typescript".into(),
                         summary: "Function a".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -5437,6 +5450,7 @@ mod tests {
                         end_line: 2,
                         language: "typescript".into(),
                         summary: "Function b".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -5448,6 +5462,7 @@ mod tests {
                         end_line: 3,
                         language: "typescript".into(),
                         summary: "Function c".into(),
+                        signature: None,
                     },
                 ],
                 &[
@@ -5499,6 +5514,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("dependency neighborhood");
         let deps = deps_resp
@@ -5527,6 +5543,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("symbol neighborhood");
         let order = symbol_resp
@@ -5569,6 +5586,7 @@ mod tests {
                         end_line: 1,
                         language: "typescript".into(),
                         summary: "Function fetchData".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -5580,6 +5598,7 @@ mod tests {
                         end_line: 2,
                         language: "typescript".into(),
                         summary: "Function retryRequest".into(),
+                        signature: None,
                     },
                 ],
                 &[engine::DependencyRecord {
@@ -5622,6 +5641,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("planned context");
 
@@ -5672,6 +5692,7 @@ mod tests {
                         end_line: 1,
                         language: "typescript".into(),
                         summary: "Function fetchData".into(),
+                        signature: None,
                     },
                     SymbolRecord {
                         id: None,
@@ -5683,6 +5704,7 @@ mod tests {
                         end_line: 2,
                         language: "typescript".into(),
                         summary: "Function retryRequest".into(),
+                        signature: None,
                     },
                 ],
                 &[engine::DependencyRecord {
@@ -5731,6 +5753,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("planned context");
 
@@ -5786,6 +5809,7 @@ mod tests {
                     end_line: 1,
                     language: "typescript".into(),
                     summary: "Function retryRequest".into(),
+                    signature: None,
                 }],
                 &[],
                 &[],
@@ -5810,6 +5834,7 @@ mod tests {
                     end_line: 2,
                     language: "typescript".into(),
                     summary: "Function fetchData".into(),
+                    signature: None,
                 }],
                 &[engine::DependencyRecord {
                     id: None,
@@ -5859,6 +5884,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("repo hierarchy");
         let modules = hierarchy
@@ -5887,6 +5913,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("module dependencies");
         let edges = module_deps
@@ -5931,6 +5958,7 @@ mod tests {
                     end_line: 1,
                     language: "typescript".into(),
                     summary: "Function retryRequest".into(),
+                    signature: None,
                 }],
                 &[],
                 &[],
@@ -5959,6 +5987,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("semantic search");
         let results = resp
@@ -6003,6 +6032,7 @@ mod tests {
                     end_line: 1,
                     language: "typescript".into(),
                     summary: "Function fetchData".into(),
+                    signature: None,
                 }],
                 &[],
                 &[LogicNodeRecord {
@@ -6038,6 +6068,7 @@ mod tests {
                 edit_description: None,
                 patch_mode: None,
                 run_tests: None,
+                ..Default::default()
             })
             .expect("workspace context");
         let repos = resp
