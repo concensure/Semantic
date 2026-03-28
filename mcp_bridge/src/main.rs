@@ -145,54 +145,64 @@ async fn call_tool(
 }
 
 async fn list_tools() -> Json<serde_json::Value> {
-    // Exactly two primary tools. Legacy aliases are routed but not advertised
-    // to keep the tool-list token cost low (~120 tokens vs ~1400 previously).
+    // Two primary tools + 3 add-on operations. Legacy aliases are routed but not
+    // advertised to keep the tool-list token cost low.
     let primary = serde_json::json!([
         {
             "name": "retrieve",
             "method": "POST",
             "endpoint": "/retrieve",
-            "description": "Targeted retrieval and analysis. Use AFTER ide_autoroute gives you orientation. Required: `operation`. Operations by use-case — symbol lookup: SearchSymbol (name), GetFileOutline (file), GetCodeSpan (file,start_line,end_line); deep context: GetPlannedContext (query,max_tokens), GetReasoningContext (name); before any edit: PlanSafeEdit (name,edit_description) — always call before writing code; diagnostics: GetPerformanceStats, GetRepoMap. Optional: session_id (pass the id echoed by ide_autoroute to deduplicate), reference_only (default true = structured refs; false = inline code), single_file_fast_path (true = target symbol only)."
+            "description": "Targeted retrieval and analysis. Use AFTER ide_autoroute gives you orientation. Required: `operation`. Operations: SearchSymbol (name), GetFileOutline (file), GetCodeSpan (file,start_line,end_line), GetPlannedContext (query,max_tokens), GetReasoningContext (name), PlanSafeEdit (name,edit_description), GetPerformanceStats, GetRepoMap, GetKnowledgeGraph, AppendKnowledge (query=category,name=title,edit_description=details,file=repository), GetChangePropagation (name=origin_repo). Optional: session_id, reference_only, single_file_fast_path."
         },
         {
             "name": "ide_autoroute",
             "method": "POST",
             "endpoint": "/ide_autoroute",
-            "description": "Start here for every task. Two modes. (1) Task mode: pass `task` (natural language). session_id is optional — auto-generated when omitted and echoed back in response.session_id; reuse it across calls to activate deduplication and avoid re-sending seen context. Intent is auto-detected: debug→1600-token budget+root-cause candidates; refactor→2000-token hybrid-ranked context; implement→1400 tokens; understand→800 tokens+inline code. Short spans (≤25 lines) are inlined automatically. Project summary auto-injected on first call for repos with ≥50 files. (2) Action mode: pass `action`+`action_input`: semantic_middleware_set, debug_failure, generate_tests, apply_tests, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, env_check, ab_test_dev."
+            "description": "Start here for every task. (1) Task mode: pass `task`. Auto-detects intent, retrieves scoped context, injects project summary (first call, ≥50 files), inlines short spans. Response includes: recommended_provider/endpoint (LLM routing), impact_scope (blast radius), knowledge_hints, test_coverage_suppressed. (2) Action mode: pass `action`+`action_input`: debug_failure, generate_tests, apply_tests, patch_memory, patch_stats, model_performance, refactor_status, evolution_issues, evolution_plans, env_check, ab_test_dev, semantic_middleware_set."
+        },
+        {
+            "name": "GetKnowledgeGraph",
+            "method": "POST",
+            "endpoint": "/retrieve",
+            "description": "Read all persisted knowledge entries. Send {\"operation\": \"GetKnowledgeGraph\"}. Returns [{category, repository, title, details, timestamp}]."
+        },
+        {
+            "name": "AppendKnowledge",
+            "method": "POST",
+            "endpoint": "/retrieve",
+            "description": "Persist a knowledge entry. Send {\"operation\": \"AppendKnowledge\", \"query\": \"<category>\", \"name\": \"<title>\", \"edit_description\": \"<details>\", \"file\": \"<repository>\"}."
+        },
+        {
+            "name": "GetChangePropagation",
+            "method": "POST",
+            "endpoint": "/retrieve",
+            "description": "Predict cross-module impact diffusion. Send {\"operation\": \"GetChangePropagation\", \"name\": \"<origin_repo>\"}."
         }
     ]);
-    // Recommended execution order (minimal token cost, correct context):
-    // 1. ide_autoroute  task="<task>"                           — always first. Returns session_id, intent-adapted context,
-    //                                                             project_summary (first call, large repos), debug_candidates (debug intent).
-    //                                                             Save response.session_id and pass it on every subsequent call.
-    // 2. retrieve        operation=PlanSafeEdit  name="<sym>"   — before writing any multi-file edit. Scopes impact, lists affected files.
-    // 3. retrieve        operation=<specific>    session_id=...  — targeted follow-up only when step-1 context is insufficient.
-    // IMPORTANT: if retrieve.GetPerformanceStats shows files_parse_failed > 0, check
-    //   indexing.last_parse_fail_paths — those files are absent from the index.
-    //   Read them directly before editing.
     Json(serde_json::json!({"ok": true, "tools": primary, "workflow": {
         "steps": [
             {"step": 1, "tool": "ide_autoroute", "call": {"task": "<describe task in plain english>"}, "note": "Always first. session_id is auto-generated if omitted — save response.session_id and reuse it. Intent is auto-detected: debug/refactor/implement/understand each get a different token budget, retrieval strategy, and response shape."},
-            {"step": 2, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>", "session_id": "<from step 1 response>"}, "note": "Before writing any code that touches more than one function. Returns impact scope and affected files. Skip only for isolated single-symbol edits with no callers."},
-            {"step": 3, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<from step 1 response>"}, "note": "Targeted follow-up only. Use when step-1 context is insufficient. Pass the same session_id to suppress already-seen spans."}
+            {"step": 2, "tool": "retrieve", "call": {"operation": "PlanSafeEdit", "name": "<target symbol>", "edit_description": "<what you intend to change>", "session_id": "<from step 1 response>"}, "note": "Before writing any code that touches more than one function. Returns impact scope and affected files."},
+            {"step": 3, "tool": "retrieve", "call": {"operation": "GetPlannedContext", "query": "<task>", "max_tokens": 3200, "session_id": "<from step 1 response>"}, "note": "Targeted follow-up only when step-1 context is insufficient."}
         ],
         "intent_behaviour": {
-            "debug":     "budget=1600, hybrid context, root_cause_candidates attached if debug_graph has state",
-            "refactor":  "budget=2000, GetHybridRankedContext (graph-aware call-site ranking)",
-            "implement": "budget=1400, GetPlannedContext (standard)",
-            "understand":"budget=800, reference_only=false (inline code, no GetCodeSpan round-trip needed)"
+            "debug":     "budget=1600, hybrid context, root_cause_candidates, impact_scope",
+            "refactor":  "budget=2000, GetHybridRankedContext, impact_scope",
+            "implement": "budget=1400, GetPlannedContext, impact_scope",
+            "understand":"budget=800, reference_only=false (inline code)"
         },
         "auto_features": [
-            "session_id is auto-generated when omitted — always echo response.session_id back on next call.",
+            "session_id auto-generated — echo response.session_id on next call.",
             "Project summary auto-injected on first call per session for repos >= 50 files.",
-            "After re-index: compact delta note (new/removed files only) instead of full summary re-send.",
-            "Context spans <= 25 lines are inlined automatically — no separate GetCodeSpan needed.",
-            "Empty-context escalation: if planner returns no refs, SearchSemanticSymbol runs automatically."
+            "recommended_provider/endpoint set by llm_router when configured.",
+            "impact_scope pre-computed (no exploratory tool calls needed).",
+            "knowledge_hints injected from KnowledgeGraph.",
+            "Test files suppressed when symbol already has coverage (understand/debug)."
         ],
         "anti_patterns": [
             "Do NOT call retrieve before ide_autoroute — you will over-fetch without intent detection.",
-            "Do NOT discard response.session_id — losing it resets deduplication and re-sends seen context.",
-            "Do NOT skip PlanSafeEdit for multi-file edits — you will miss callers and break dependents.",
+            "Do NOT discard response.session_id — losing it resets deduplication.",
+            "Do NOT skip PlanSafeEdit for multi-file edits.",
             "Do NOT call GetCodeSpan for spans already inlined in response.result.context[*].code_span."
         ]
     }}))
@@ -295,6 +305,9 @@ fn map_retrieve_operation(name: &str) -> Option<&'static str> {
         "get_deployment_history" => Some("GetDeploymentHistory"),
         "get_performance_stats" => Some("GetPerformanceStats"),
         "get_project_summary" => Some("GetProjectSummary"),
+        "GetKnowledgeGraph" | "get_knowledge_graph" => Some("GetKnowledgeGraph"),
+        "AppendKnowledge" | "append_knowledge" => Some("AppendKnowledge"),
+        "GetChangePropagation" | "get_change_propagation" => Some("GetChangePropagation"),
         _ => None,
     }
 }

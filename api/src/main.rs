@@ -8,8 +8,14 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use change_propagation::ChangePropagationEngine;
+use dependency_intelligence::DependencyIntelligence;
 use engine::{Operation, PatchApplicationMode, RetrievalRequest, RetrievalResponse};
+use impact_analysis::ImpactAnalyzer;
 use indexer::Indexer;
+use knowledge_graph::{KnowledgeEntry, KnowledgeGraph};
+use llm_router::{LLMRouter, LLMTask};
+use org_graph::OrganizationGraphBuilder;
 use parking_lot::Mutex;
 use retrieval::RetrievalService;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -18,7 +24,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use storage::default_paths;
 use telemetry::{metadata_pairs, TaskScope, TelemetrySink};
-use tracing::{error, info};
+use test_coverage::TestCoverageAnalyzer;
+use tracing::{error, info, warn};
 use watcher::RepoWatcher;
 
 #[derive(Clone)]
@@ -26,6 +33,8 @@ struct AppState {
     retrieval: Arc<Mutex<RetrievalService>>,
     semantic_middleware: Arc<Mutex<SemanticMiddlewareState>>,
     workspace_state: Arc<Mutex<WorkspaceState>>,
+    llm_router: Option<Arc<LLMRouter>>,
+    knowledge_graph: Arc<Mutex<KnowledgeGraph>>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,10 +149,63 @@ async fn main() -> Result<()> {
 
     let workspace_state = WorkspaceState::load(&repo_root);
 
+    // --- TIER 1A: LLM Router init ---
+    let llm_router = {
+        let sem = repo_root.join(".semantic");
+        // Accept both naming conventions for provider config
+        let providers_path = if sem.join("llm_providers.toml").exists() {
+            sem.join("llm_providers.toml")
+        } else {
+            sem.join("llm_config.toml")
+        };
+        let routing_path = sem.join("llm_routing.toml");
+        // Accept both naming conventions for metrics
+        let metrics_path = if sem.join("llm_metrics.json").exists() {
+            sem.join("llm_metrics.json")
+        } else {
+            sem.join("model_metrics.json")
+        };
+        let result = (|| -> anyhow::Result<LLMRouter> {
+            let providers_toml = std::fs::read_to_string(&providers_path)?;
+            let routing_toml = std::fs::read_to_string(&routing_path)?;
+            let metrics_json = std::fs::read_to_string(&metrics_path)?;
+            LLMRouter::from_files(&providers_toml, &routing_toml, &metrics_json)
+        })();
+        match result {
+            Ok(router) => {
+                info!("LLM router initialized");
+                Some(Arc::new(router))
+            }
+            Err(e) => {
+                warn!("LLM router not available (graceful degradation): {e}");
+                None
+            }
+        }
+    };
+
+    // --- TIER 1C: Knowledge Graph init ---
+    // KnowledgeGraph::open creates .semantic/knowledge_graph dir; on failure fall back to a
+    // temp directory so the rest of the server still starts cleanly.
+    let knowledge_graph = {
+        let kg_result = KnowledgeGraph::open(&repo_root);
+        match kg_result {
+            Ok(kg) => Arc::new(Mutex::new(kg)),
+            Err(e) => {
+                warn!("KnowledgeGraph init failed (graceful degradation): {e}");
+                let tmp = std::env::temp_dir().join("semantic_kg_fallback");
+                let kg_fallback = KnowledgeGraph::open(&tmp)
+                    .expect("KnowledgeGraph fallback in temp dir must succeed");
+                Arc::new(Mutex::new(kg_fallback))
+            }
+        }
+    };
+
     let state = AppState {
         retrieval: retrieval_service,
         semantic_middleware: Arc::new(Mutex::new(SemanticMiddlewareState::default())),
         workspace_state: Arc::new(Mutex::new(workspace_state)),
+        llm_router,
+        knowledge_graph,
     };
 
     let app = Router::new()
@@ -444,6 +506,55 @@ async fn retrieve(
                         "cache_hit": doc.cache_hit,
                         "summary": doc.to_json(),
                         "summary_text": doc.summary_text,
+                    }),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            // TIER 1C: Knowledge Graph operations
+            Operation::GetKnowledgeGraph => {
+                return Json(match state.knowledge_graph.lock().list() {
+                    Ok(entries) => serde_json::json!({
+                        "ok": true,
+                        "operation": "GetKnowledgeGraph",
+                        "result": entries
+                    }),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            Operation::AppendKnowledge => {
+                let category = body.request.query.clone().unwrap_or_default();
+                let title = body.request.name.clone().unwrap_or_default();
+                let details = body.request.edit_description.clone().unwrap_or_default();
+                let repository = body.request.file.clone().unwrap_or_default();
+                let entry = KnowledgeEntry {
+                    timestamp: now_epoch_s(),
+                    category,
+                    title,
+                    details,
+                    repository,
+                };
+                return Json(match state.knowledge_graph.lock().append(&entry) {
+                    Ok(()) => serde_json::json!({"ok": true, "operation": "AppendKnowledge"}),
+                    Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
+                });
+            }
+            // TIER 3: Change propagation operation
+            Operation::GetChangePropagation => {
+                let origin_repo = body.request.name.clone()
+                    .or_else(|| body.request.query.clone())
+                    .unwrap_or_default();
+                let result = {
+                    let retrieval_guard = state.retrieval.lock();
+                    let org_graph = OrganizationGraphBuilder::build(retrieval_guard.storage_ref())
+                        .unwrap_or_default();
+                    DependencyIntelligence::analyze(retrieval_guard.storage_ref(), &org_graph)
+                        .map(|insight| ChangePropagationEngine::predict(&origin_repo, &insight))
+                };
+                return Json(match result {
+                    Ok(propagation) => serde_json::json!({
+                        "ok": true,
+                        "operation": "GetChangePropagation",
+                        "result": propagation
                     }),
                     Err(err) => serde_json::json!({"ok": false, "error": err.to_string()}),
                 });
@@ -1399,6 +1510,97 @@ async fn ide_autoroute(
         }
     }
 
+    // TIER 1A: LLM Router — map intent to task and get recommended provider/endpoint
+    let llm_task = match intent {
+        "debug" | "refactor" => LLMTask::Planning,
+        "implement" => LLMTask::CodeExecution,
+        _ => LLMTask::InteractiveChat,
+    };
+    let route_decision = state.llm_router.as_ref().and_then(|r| r.route(llm_task));
+    let recommended_provider: Option<&str> = route_decision.as_ref().map(|d| d.provider.as_str());
+    let recommended_endpoint: Option<&str> = route_decision.as_ref().map(|d| d.endpoint.as_str());
+
+    // TIER 1B: Impact Analysis — run if symbol is known and intent is code-modifying
+    let current_symbol_for_addons = result
+        .get("symbol")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let impact_scope: serde_json::Value = if !current_symbol_for_addons.is_empty()
+        && matches!(intent, "debug" | "refactor" | "implement")
+    {
+        let report_result = {
+            let retrieval_guard = state.retrieval.lock();
+            ImpactAnalyzer::analyze(retrieval_guard.storage_ref(), &current_symbol_for_addons)
+        };
+        match report_result {
+            Ok(report) => {
+                let impacted_files: Vec<&str> = report.impacted_files.iter()
+                    .take(10).map(|s| s.as_str()).collect();
+                let impacted_symbols: Vec<&str> = report.impacted_symbols.iter()
+                    .take(15).map(|s| s.as_str()).collect();
+                let has_test_impact = !report.impacted_tests.is_empty();
+                serde_json::json!({
+                    "impacted_files": impacted_files,
+                    "impacted_symbols": impacted_symbols,
+                    "has_test_impact": has_test_impact
+                })
+            }
+            Err(_) => serde_json::Value::Null,
+        }
+    } else {
+        serde_json::Value::Null
+    };
+
+    // TIER 2A: Test Coverage — suppress test files when symbol already has coverage
+    let test_coverage_suppressed = if matches!(intent, "understand" | "debug") && !current_symbol_for_addons.is_empty() {
+        let gaps_result = {
+            let retrieval_guard = state.retrieval.lock();
+            TestCoverageAnalyzer::analyze(retrieval_guard.storage_ref())
+        };
+        let symbol_has_gap = match gaps_result {
+            Ok(gaps) => gaps.iter().any(|g| g.symbol.eq_ignore_ascii_case(&current_symbol_for_addons)),
+            Err(_) => true,
+        };
+        if !symbol_has_gap {
+            if let Some(ctx) = result.get_mut("context").and_then(|v| v.as_array_mut()) {
+                ctx.retain(|item| {
+                    let file = item.get("file").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+                    !(file.contains("test") || file.contains("spec") || file.contains("__tests__") || file.contains("_test."))
+                });
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // TIER 1C: Knowledge Graph hints — inject relevant entries
+    let knowledge_hints: serde_json::Value = {
+        let repo_name = state.retrieval.lock().repo_root()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        match state.knowledge_graph.lock().list() {
+            Ok(entries) => {
+                let hints: Vec<serde_json::Value> = entries.iter().rev()
+                    .filter(|e| e.repository.is_empty() || e.repository == "*" || e.repository == repo_name)
+                    .take(5)
+                    .map(|e| serde_json::json!({
+                        "category": e.category,
+                        "title": e.title,
+                        "details": e.details
+                    }))
+                    .collect();
+                serde_json::json!(hints)
+            }
+            Err(_) => serde_json::json!([]),
+        }
+    };
+
     Json(serde_json::json!({
         "ok": true,
         "session_id": effective_session_id.as_str(),
@@ -1412,14 +1614,16 @@ async fn ide_autoroute(
         "refs_unchanged": refs_unchanged,
         "context_delta": context_delta,
         "context_delta_mode": context_delta_mode,
+        "recommended_provider": recommended_provider,
+        "recommended_endpoint": recommended_endpoint,
+        "impact_scope": impact_scope,
+        "knowledge_hints": knowledge_hints,
+        "test_coverage_suppressed": test_coverage_suppressed,
         "result": result,
         "debug_candidates": debug_candidates,
         "project_summary": if let Some(s) = auto_summary {
-            // Auto-injected on first call of a new session for medium/large repos.
             Some(s)
         } else if include_summary {
-            // Explicit caller override (e.g. small repos or forced refresh).
-            // Use Standard tier for understand/implement, Full for debug/refactor.
             let tier = match intent {
                 "debug" | "refactor" => project_summariser::SummaryTier::Full,
                 _ => project_summariser::SummaryTier::Standard,

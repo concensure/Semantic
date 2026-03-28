@@ -84,6 +84,9 @@ Supported operations and when to use them:
 - `get_test_gaps`: symbols lacking test coverage (no params)
 - `get_deployment_history`: deployment history (no params)
 - `get_performance_stats`: retrieval performance metrics (no params)
+- `GetKnowledgeGraph`: read all persisted knowledge entries (no params)
+- `AppendKnowledge`: persist a new knowledge entry (`query`=category, `name`=title, `edit_description`=details, `file`=repository)
+- `GetChangePropagation`: predict cross-module impact from a changed repo (`name`=origin_repo)
 
 ## Edit Path (`PATCH /edit`)
 
@@ -170,6 +173,23 @@ Legacy MCP tools (backward compatible, deprecated):
 - `debug_graph`, `root_cause_candidates`, `test_gaps`, `pipeline_graph`, `deployment_history`
 - `performance_stats`, `control_flow_hints`, `data_flow_hints`, `hybrid_ranked_context`
 - `ab_test_dev`, `ab_test_dev_results`, `llm_tools`, `semantic_first`
+
+## `ide_autoroute` New Response Fields (2026-03-28)
+
+The following fields are now automatically included in every `ide_autoroute` response:
+
+| Field | Type | Description |
+|---|---|---|
+| `recommended_provider` | `string \| null` | Provider name selected by `llm_router` for this intent (e.g. `"anthropic"`, `"openai"`). Null if router not configured. |
+| `recommended_endpoint` | `string \| null` | Resolved endpoint URL for the recommended provider. Null if router not configured. |
+| `impact_scope` | `object \| null` | Pre-computed blast radius for debug/refactor/implement intents: `{impacted_files, impacted_symbols, has_test_impact}`. Null for understand intent or empty symbol. |
+| `knowledge_hints` | `array` | Up to 5 most-recent knowledge graph entries relevant to this repo: `[{category, title, details}]`. Empty array if none. |
+| `test_coverage_suppressed` | `bool` | True when test files were filtered from context refs because the target symbol already has coverage (understand/debug intents only). |
+| `refs_unchanged` | `bool` | True when context refs are identical to the prior call in this session (no re-serialization needed). |
+| `context_delta` | `object \| null` | `{added, removed}` ref arrays when fewer than 5 refs changed from prior call. Null otherwise. |
+| `context_delta_mode` | `bool` | True when delta context mode is active for this response. |
+| `summary_tier` | `string` | Tier used for project summary: `"nano"`, `"standard"`, or `"full"`. |
+| `summary_scope` | `string` | `"symbol_filtered"` when summary modules were filtered to target symbol's dependency graph; `"full"` otherwise. |
 
 ## Suggested Call Sequence in IDE Agents
 

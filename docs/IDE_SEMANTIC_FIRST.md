@@ -126,7 +126,73 @@ The following optimisations reduce per-call token usage without degrading retrie
 | Tiered project summary | `project_summariser/src/lib.rs` | Nano/Standard/Full tiers; intent-driven tier selection |
 | Symbol-scoped summary | `project_summariser/src/lib.rs` + `api/src/main.rs` | Modules filtered to target symbol + deps on Standard/Full tier |
 
-## 7) Demo Project
+## 7) Optional Add-On Modules (2026-03-28)
+
+The following crates are now wired into `ide_autoroute` and the retrieval stack. All are opt-in by configuration and degrade gracefully if not configured.
+
+| Add-on | Crate | What it enables | Config required |
+|---|---|---|---|
+| **LLM Router** | `llm_router` | Per-intent model routing. Sets `recommended_provider` + `recommended_endpoint` in every `ide_autoroute` response. Understand/chat → cheap model; debug/refactor → capable model. | `.semantic/llm_providers.toml`, `.semantic/llm_routing.toml`, `.semantic/llm_metrics.json` |
+| **Impact Analysis** | `impact_analysis` | Pre-computes blast radius for debug/refactor/implement. Injects `impact_scope: {impacted_files, impacted_symbols, has_test_impact}` — eliminates 2-4 exploratory tool calls per session. | None (uses indexed storage) |
+| **Knowledge Graph** | `knowledge_graph` | Persists design decisions, gotchas, refactor rationale as JSONL at `.semantic/knowledge_graph/knowledge.jsonl`. Injected as `knowledge_hints` on every `ide_autoroute` call. Writable via `AppendKnowledge` operation. | None (auto-created) |
+| **Test Coverage** | `test_coverage` | Suppresses test files from context refs when target symbol already has coverage (understand/debug intents). Sets `test_coverage_suppressed: true` when active. | None (uses indexed storage) |
+| **AST Cache** | `ast_cache` | In-memory cache of parsed tree-sitter trees keyed by file path + length. Eliminates redundant re-parsing within a process lifetime. | None (automatic) |
+| **Change Propagation** | `change_propagation` | Cross-module impact diffusion via `GetChangePropagation` operation. Predicts downstream effects in workspace/monorepo setups. | Requires populated `org_graph` for multi-repo use |
+
+### Configuring LLM Router
+
+Create `.semantic/llm_providers.toml` with your provider endpoints (no keys in this file — use environment variables for secrets):
+
+```toml
+[providers]
+anthropic = "<configure-endpoint>"
+openai = "<configure-endpoint>"
+openrouter = "<configure-endpoint>"
+```
+
+Create `.semantic/llm_routing.toml` to map task types to providers:
+
+```toml
+[planning]
+preferred = ["anthropic", "openai"]
+
+[execution]
+preferred = ["openai", "openrouter"]
+
+[interactive]
+preferred = ["openrouter", "openai"]
+```
+
+Populate `.semantic/llm_metrics.json` with live performance data (or leave as `{}` to use preference order only):
+
+```json
+{
+  "anthropic": { "latency_ms": 200, "token_cost": 0.3, "failure_rate": 0.005 },
+  "openai":    { "latency_ms": 120, "token_cost": 0.5, "failure_rate": 0.01 }
+}
+```
+
+### Using Knowledge Graph
+
+Append entries via MCP:
+```json
+{"operation": "AppendKnowledge", "name": "auth middleware rewritten", "query": "design_decision", "edit_description": "Rewritten for compliance — session tokens must not be stored in plaintext", "file": "my-repo"}
+```
+
+Read entries:
+```json
+{"operation": "GetKnowledgeGraph"}
+```
+
+### Using Change Propagation
+
+```json
+{"operation": "GetChangePropagation", "name": "my-api-repo"}
+```
+
+Returns predicted propagation impact across dependent modules/repos.
+
+## 8) Demo Project
 
 The semantic repository includes a demo todo app used by A/B development tasks:
 
