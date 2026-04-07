@@ -1,4 +1,5 @@
 use crate::models::RetrieveRequestBody;
+use crate::runtime::summarize_indexed_path_hints;
 use crate::runtime::AppRuntime;
 use crate::session::{
     apply_session_context_reuse, apply_session_raw_expansion_controls, touch_or_create_session,
@@ -353,6 +354,11 @@ impl AppRuntime {
                             retry_body.auto_index_target = Some(false);
                             let mut retried = self.try_handle_retrieve(retry_body)?;
                             if retrieve_coverage_resolved(&retried, target) {
+                                let indexed_files = self
+                                    .retrieval()
+                                    .lock()
+                                    .with_storage(|storage| storage.list_files())
+                                    .unwrap_or_default();
                                 if let Some(obj) = retried.as_object_mut() {
                                     obj.insert(
                                         "auto_index_applied".to_string(),
@@ -361,6 +367,16 @@ impl AppRuntime {
                                     obj.insert(
                                         "auto_index_target".to_string(),
                                         serde_json::json!(target),
+                                    );
+                                    obj.insert(
+                                        "indexed_file_count".to_string(),
+                                        serde_json::json!(indexed_files.len()),
+                                    );
+                                    obj.insert(
+                                        "indexed_path_hints".to_string(),
+                                        serde_json::json!(summarize_indexed_path_hints(
+                                            &indexed_files
+                                        )),
                                     );
                                 }
                             }
@@ -587,6 +603,16 @@ mod tests {
         assert_eq!(
             value.get("auto_index_target").and_then(|v| v.as_str()),
             Some("src/worker/job.ts")
+        );
+        assert_eq!(
+            value.get("indexed_file_count").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert!(
+            value.get("indexed_path_hints")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().any(|item| item.as_str() == Some("src/worker")))
+                .unwrap_or(false)
         );
         let result = value.get("result").expect("result");
         assert_eq!(

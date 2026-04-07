@@ -1097,6 +1097,24 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             out.push_str(&format!("\nauto_index: applied @ {target}"));
+            if let Some(count) = value.get("indexed_file_count").and_then(|v| v.as_u64()) {
+                out.push_str(&format!("\nindexed_file_count: {count}"));
+            }
+            let indexed_path_hints: Vec<String> = value
+                .get("indexed_path_hints")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items.iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !indexed_path_hints.is_empty() {
+                out.push_str(&format!(
+                    "\nindexed_path_hints: {}",
+                    indexed_path_hints.join(" | ")
+                ));
+            }
         }
         if let Some(tool) = value.get("selected_tool").and_then(|v| v.as_str()) {
             out.push_str(&format!("\nselected_tool: {tool}"));
@@ -1430,6 +1448,24 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 out.push_str(&format!("\nauto_index: applied @ {target}"));
+                if let Some(count) = value.get("indexed_file_count").and_then(|v| v.as_u64()) {
+                    out.push_str(&format!("\nindexed_file_count: {count}"));
+                }
+                let indexed_path_hints: Vec<String> = value
+                    .get("indexed_path_hints")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items.iter()
+                            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !indexed_path_hints.is_empty() {
+                    out.push_str(&format!(
+                        "\nindexed_path_hints: {}",
+                        indexed_path_hints.join(" | ")
+                    ));
+                }
             }
             if let Some(result) = value.get("result") {
                 out.push_str(&format!("\nresult: {}", summarize_value(result, verbose)));
@@ -2286,6 +2322,47 @@ mod tests {
         });
         let rendered = text_output(&value, false);
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
+    }
+
+    #[test]
+    fn route_text_output_surfaces_auto_index_growth_summary() {
+        let value = serde_json::json!({
+            "intent": "understand",
+            "auto_index_applied": true,
+            "auto_index_target": "src/worker/job.ts",
+            "indexed_file_count": 2,
+            "indexed_path_hints": ["src/auth", "src/worker"],
+            "verification": {
+                "status": "low_confidence"
+            },
+            "result": {
+                "symbol": "runJob"
+            }
+        });
+        let rendered = text_output(&value, false);
+        assert!(rendered.contains("auto_index: applied @ src/worker/job.ts"));
+        assert!(rendered.contains("indexed_file_count: 2"));
+        assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
+    }
+
+    #[test]
+    fn retrieve_text_output_surfaces_auto_index_growth_summary() {
+        let value = serde_json::json!({
+            "ok": true,
+            "operation": "search_symbol",
+            "auto_index_applied": true,
+            "auto_index_target": "src/worker/job.ts",
+            "indexed_file_count": 2,
+            "indexed_path_hints": ["src/auth", "src/worker"],
+            "result": {
+                "index_coverage": "indexed_target",
+                "index_coverage_target": "src/worker/job.ts"
+            }
+        });
+        let rendered = text_output(&value, false);
+        assert!(rendered.contains("auto_index: applied @ src/worker/job.ts"));
+        assert!(rendered.contains("indexed_file_count: 2"));
+        assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
     }
 
     #[test]

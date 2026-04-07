@@ -260,7 +260,7 @@ impl Drop for RepoIndexLock {
     }
 }
 
-fn summarize_indexed_path_hints(files: &[String]) -> Vec<String> {
+pub(crate) fn summarize_indexed_path_hints(files: &[String]) -> Vec<String> {
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     for file in files {
         let hint = Path::new(file)

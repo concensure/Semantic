@@ -1,4 +1,5 @@
 use crate::models::IdeAutoRouteRequest;
+use crate::runtime::summarize_indexed_path_hints;
 use crate::runtime::AppRuntime;
 use crate::session::{
     apply_session_context_reuse, apply_session_raw_expansion_controls, auto_session_id,
@@ -293,9 +294,19 @@ impl AppRuntime {
                     retry_body.auto_index_target = Some(false);
                     let mut retried = self.handle_autoroute(retry_body);
                     if route_coverage_resolved(&retried, target) {
+                        let indexed_files = self
+                            .retrieval()
+                            .lock()
+                            .with_storage(|storage| storage.list_files())
+                            .unwrap_or_default();
                         if let Some(obj) = retried.as_object_mut() {
                             obj.insert("auto_index_applied".to_string(), json!(true));
                             obj.insert("auto_index_target".to_string(), json!(target));
+                            obj.insert("indexed_file_count".to_string(), json!(indexed_files.len()));
+                            obj.insert(
+                                "indexed_path_hints".to_string(),
+                                json!(summarize_indexed_path_hints(&indexed_files)),
+                            );
                         }
                     }
                     return retried;
@@ -3102,6 +3113,16 @@ mod tests {
             value.get("auto_index_target").and_then(|v| v.as_str()),
             Some("src/worker")
         );
+        assert_eq!(
+            value.get("indexed_file_count").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert!(
+            value.get("indexed_path_hints")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().any(|item| item.as_str() == Some("src/worker")))
+                .unwrap_or(false)
+        );
         let verification = value.get("verification").expect("verification");
         assert_eq!(
             verification
@@ -3176,6 +3197,10 @@ mod tests {
         assert_eq!(
             value.get("auto_index_target").and_then(|v| v.as_str()),
             Some("src/worker/job.ts")
+        );
+        assert_eq!(
+            value.get("indexed_file_count").and_then(|v| v.as_u64()),
+            Some(2)
         );
         let verification = value.get("verification").expect("verification");
         assert_eq!(
