@@ -99,7 +99,9 @@ impl<'a> ErrorLogger<'a> {
         let hash = error_hash(error_kind, &normalized);
         let mut patterns = self.storage.find_error_patterns_by_hash(&hash)?;
         if patterns.is_empty() {
-            patterns = self.storage.find_error_patterns_by_kind(error_kind, limit)?;
+            patterns = self
+                .storage
+                .find_error_patterns_by_kind(error_kind, limit)?;
         }
         patterns.truncate(limit);
         let mut out = Vec::new();
@@ -152,7 +154,10 @@ impl<'a> ErrorLogger<'a> {
     /// Recurring issues summary for project_summariser (hit_count >= threshold).
     pub fn recurring_issues(&self, min_hits: i64) -> Result<Vec<ErrorPattern>> {
         let all = self.storage.list_error_patterns(20)?;
-        Ok(all.into_iter().filter(|p| p.hit_count >= min_hits).collect())
+        Ok(all
+            .into_iter()
+            .filter(|p| p.hit_count >= min_hits)
+            .collect())
     }
 }
 

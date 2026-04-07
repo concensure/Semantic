@@ -7,8 +7,8 @@ use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,7 +44,12 @@ impl TelemetryConfig {
         let config_path = semantic_dir.join("token_tracking.toml");
         let mut cfg = Self {
             enabled: std::env::var("SEMANTIC_TOKEN_TRACKING_ENABLED")
-                .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .map(|v| {
+                    matches!(
+                        v.trim().to_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
                 .unwrap_or(false),
             log_path: std::env::var("SEMANTIC_TOKEN_TRACKING_LOG_PATH")
                 .map(PathBuf::from)
@@ -68,7 +73,8 @@ impl TelemetryConfig {
             let value = value.trim().trim_matches('"');
             match key {
                 "enabled" => {
-                    cfg.enabled = matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on");
+                    cfg.enabled =
+                        matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on");
                 }
                 "redaction_level" => {
                     cfg.redaction_level = RedactionLevel::parse(value);
@@ -298,7 +304,10 @@ fn sanitize_value(value: Value, level: RedactionLevel) -> Value {
                 {
                     continue;
                 }
-                if lowered.contains("prompt") || lowered.contains("content") || lowered.contains("output") {
+                if lowered.contains("prompt")
+                    || lowered.contains("content")
+                    || lowered.contains("output")
+                {
                     match level {
                         RedactionLevel::Strict => continue,
                         RedactionLevel::Balanced => {
@@ -317,7 +326,10 @@ fn sanitize_value(value: Value, level: RedactionLevel) -> Value {
                                 out.insert(key, Value::String(raw.to_string()));
                             }
                             _ => {
-                                out.insert(key, Value::String(format!("path:{}", hash_string(raw))));
+                                out.insert(
+                                    key,
+                                    Value::String(format!("path:{}", hash_string(raw))),
+                                );
                             }
                         }
                         continue;
@@ -327,7 +339,12 @@ fn sanitize_value(value: Value, level: RedactionLevel) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(items) => Value::Array(items.into_iter().map(|item| sanitize_value(item, level)).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| sanitize_value(item, level))
+                .collect(),
+        ),
         Value::String(raw) => match level {
             RedactionLevel::Strict if raw.len() > 120 => Value::String(truncate(&raw, 32)),
             _ => Value::String(raw),

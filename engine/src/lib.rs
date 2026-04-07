@@ -29,6 +29,8 @@ pub struct DependencyRecord {
     pub caller_symbol: String,
     pub callee_symbol: String,
     pub file: String,
+    #[serde(default)]
+    pub callee_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -284,6 +286,8 @@ pub struct RetrievalRequest {
     pub name: Option<String>,
     pub query: Option<String>,
     pub file: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
     pub max_tokens: Option<usize>,
@@ -313,6 +317,8 @@ pub struct RetrievalRequest {
     pub outcome: Option<String>,
     #[serde(default)]
     pub token_cost: Option<i64>,
+    #[serde(default)]
+    pub heading: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -324,8 +330,11 @@ pub enum Operation {
     GetWorkspaceMode,
     #[default]
     GetRepoMap,
+    GetDirectoryBrief,
     GetFileOutline,
+    GetFileBrief,
     SearchSymbol,
+    GetSymbolBrief,
     GetFunction,
     GetClass,
     GetDependencies,
@@ -356,6 +365,7 @@ pub enum Operation {
     GetDeploymentHistory,
     GetPerformanceStats,
     GetProjectSummary,
+    GetSectionBrief,
     GetErrorContext,
     RecordError,
     RecordSolution,

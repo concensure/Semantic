@@ -95,7 +95,10 @@ impl CodeHealthAnalyzer {
             }
         }
         for module in modules {
-            let count = module_symbol_counts.get(&module.name).copied().unwrap_or_default();
+            let count = module_symbol_counts
+                .get(&module.name)
+                .copied()
+                .unwrap_or_default();
             if count > 80 {
                 issues.push(issue(
                     repository,
@@ -124,7 +127,10 @@ impl CodeHealthAnalyzer {
                         Some(sym.name.clone()),
                         IssueType::DuplicateLogic,
                         Severity::Medium,
-                        format!("function length {} appears duplicated in multiple symbols", len),
+                        format!(
+                            "function length {} appears duplicated in multiple symbols",
+                            len
+                        ),
                     ));
                 }
             }

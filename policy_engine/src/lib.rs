@@ -54,9 +54,7 @@ impl PolicyEngine {
                 }
             }
         }
-        Ok(Self {
-            config,
-        })
+        Ok(Self { config })
     }
 
     pub fn validate_edit_plan(&self, plan: &EditPlan) -> Result<()> {
@@ -70,7 +68,11 @@ impl PolicyEngine {
     }
 
     pub fn requires_confirmation(&self, edit_type: &EditType) -> bool {
-        let required = self.config.require_confirmation_for.clone().unwrap_or_default();
+        let required = self
+            .config
+            .require_confirmation_for
+            .clone()
+            .unwrap_or_default();
         let key = match edit_type {
             EditType::ModifyLogic => "ModifyLogic",
             EditType::ChangeSignature => "ChangeSignature",

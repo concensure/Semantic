@@ -4,7 +4,11 @@ use engine::{EditContextItem, EditPlan, EditType};
 pub struct SafeEditPlanner;
 
 impl SafeEditPlanner {
-    pub fn plan(storage: &storage::Storage, symbol: &str, edit_description: &str) -> Result<EditPlan> {
+    pub fn plan(
+        storage: &storage::Storage,
+        symbol: &str,
+        edit_description: &str,
+    ) -> Result<EditPlan> {
         Self::plan_with_risk(storage, symbol, edit_description, 0.0)
     }
 
@@ -107,8 +111,8 @@ fn classify_edit_type(text: &str) -> EditType {
 #[cfg(test)]
 mod tests {
     use super::SafeEditPlanner;
-    use patch_memory::PatchMemory;
     use engine::{DependencyRecord, SymbolRecord, SymbolType};
+    use patch_memory::PatchMemory;
     use storage::Storage;
 
     #[test]
@@ -243,8 +247,12 @@ mod tests {
         })
         .expect("append");
 
-        let plan = SafeEditPlanner::plan_with_memory(&storage, "retryRequest", "rename symbol", &mem)
-            .expect("plan");
-        assert!(plan.required_context.iter().any(|c| c.text.contains("caller context")));
+        let plan =
+            SafeEditPlanner::plan_with_memory(&storage, "retryRequest", "rename symbol", &mem)
+                .expect("plan");
+        assert!(plan
+            .required_context
+            .iter()
+            .any(|c| c.text.contains("caller context")));
     }
 }

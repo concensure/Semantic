@@ -1,0 +1,16 @@
+[package]
+name = "test_support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+engine = { path = "../engine" }
+indexer = { path = "../indexer" }
+retrieval = { path = "../retrieval" }
+semantic_app = { path = "../semantic_app" }
+storage = { path = "../storage" }

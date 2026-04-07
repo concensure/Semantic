@@ -70,10 +70,7 @@ fn parse_string_array(value: &str) -> Vec<String> {
         return Vec::new();
     }
     let inner = &v[1..v.len() - 1];
-    inner
-        .split(',')
-        .filter_map(parse_quoted_string)
-        .collect()
+    inner.split(',').filter_map(parse_quoted_string).collect()
 }
 
 fn parse_providers(content: &str) -> HashMap<String, String> {
@@ -129,7 +126,8 @@ impl LLMRouter {
     pub fn from_files(provider_toml: &str, routing_toml: &str, metrics_json: &str) -> Result<Self> {
         let providers = parse_providers(provider_toml);
         let routing = parse_routing(routing_toml);
-        let metrics: HashMap<String, ModelMetric> = serde_json::from_str(metrics_json).unwrap_or_default();
+        let metrics: HashMap<String, ModelMetric> =
+            serde_json::from_str(metrics_json).unwrap_or_default();
 
         Ok(Self {
             providers,
@@ -140,9 +138,21 @@ impl LLMRouter {
 
     pub fn route(&self, task: LLMTask) -> Option<RouteDecision> {
         let preferred = match task {
-            LLMTask::Planning => self.routing.planning.as_ref().and_then(|p| p.preferred.clone()),
-            LLMTask::CodeExecution => self.routing.execution.as_ref().and_then(|p| p.preferred.clone()),
-            LLMTask::InteractiveChat => self.routing.interactive.as_ref().and_then(|p| p.preferred.clone()),
+            LLMTask::Planning => self
+                .routing
+                .planning
+                .as_ref()
+                .and_then(|p| p.preferred.clone()),
+            LLMTask::CodeExecution => self
+                .routing
+                .execution
+                .as_ref()
+                .and_then(|p| p.preferred.clone()),
+            LLMTask::InteractiveChat => self
+                .routing
+                .interactive
+                .as_ref()
+                .and_then(|p| p.preferred.clone()),
         }
         .unwrap_or_default();
 

@@ -41,11 +41,28 @@ Thumbs.db
 # Logs
 *.log
 
+# Local planning / scratch docs
+docs/doc_ignore/
+one click install.txt
+
+# Private / non-open-source modules
+evolution_graph/
+
+# Non-core evaluation / fixture assets
+test_coverage/
+test_fixtures/
+
 # Environment
 .env
 .env.local
 .semantic/.env
 .semantic/mcp_bridge_token.txt
+.semantic/semantic.db
+.semantic/index.lock
+.semantic/index_performance.json
+.semantic/workspace.toml
+.semantic/tantivy/
+.semantic/knowledge_graph/
 
 # Test repo runtime data
 test_repo/.semantic/

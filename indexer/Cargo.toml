@@ -15,3 +15,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+test_support = { path = "../test_support" }

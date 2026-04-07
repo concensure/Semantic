@@ -35,8 +35,6 @@ Legacy named tools (`get_repo_map`, `debug_failure`, etc.) remain available for 
   - `GET /mcp/tools` — returns `tools` (primary) and `legacy_tools`
   - `POST /mcp/tools/call`
 
-Use environment placeholders in shared docs and configs. Do not publish workstation-local URLs, bridge tokens, or provider API keys.
-
 ## Core Retrieval Operations (`POST /retrieve`)
 
 Request envelope:
@@ -77,7 +75,8 @@ Supported operations and when to use them:
 - `plan_safe_edit`: impact-aware patch planning (`name`/`query`, `edit_description`)
 - `get_control_flow_hints`: control-flow hints for a symbol (`name` or `query` = symbol name)
 - `get_data_flow_hints`: data-flow hints for a symbol (`name` or `query` = symbol name)
-- `get_hybrid_ranked_context`: hybrid ranked context (`query`, optional `max_tokens`)
+- `get_hybrid_ranked_context`: compact hybrid ranked context (`query`, optional `max_tokens`)
+  returns ranked spans plus compact graph-rank signals; use `get_control_flow_hints`, `get_data_flow_hints`, or `get_logic_clusters` when you need full graph detail
 - `get_debug_graph`: current debug failure graph (no params)
 - `get_pipeline_graph`: CI/CD pipeline graph (no params)
 - `get_root_cause_candidates`: root cause candidates from debug graph (no params)
@@ -222,7 +221,7 @@ Full manual alternative:
 | **Symbol-scoped summary** | Symbol resolved on Standard/Full tier | Modules filtered to those containing target symbol + direct deps; `summary_scope: "symbol_filtered"` |
 | **Compact refs** | All prompt-building paths | `serde_json::to_string` (not pretty-print) used for context refs in prompts |
 | **Compact context_phase** | FootprintFirst mode | `context_phase` value shortened to `"fp_staged"` (was verbose) |
-| **Candidate list cap** | All responses | `candidate_files` and `candidate_symbols` capped at 5 entries |
+| **Candidate list cap** | Compact client responses | `candidate_symbols` capped at 3 entries with the target symbol first when known |
 | **Refs unchanged detection** | Same session, same symbol | `refs_unchanged: true` when context refs match previous call hash |
 | **Delta context mode** | Same session, same symbol, small change | `context_delta` contains `{added, removed}` ref arrays; `context_delta_mode: true` when <5 refs changed |
 | **Diff summary** | Re-index detected | Sends compact delta (1–5 new/removed files) or full summary (>5) |

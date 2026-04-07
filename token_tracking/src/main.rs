@@ -184,7 +184,8 @@ async fn get_trends(State(state): State<Arc<AppState>>) -> Json<serde_json::Valu
 }
 
 async fn index() -> Html<&'static str> {
-    Html(r#"<!doctype html>
+    Html(
+        r#"<!doctype html>
 <html>
 <head>
 <meta charset="utf-8"/>
@@ -266,7 +267,8 @@ async function showTask(taskId){
 loadDashboard();
 </script>
 </body>
-</html>"#)
+</html>"#,
+    )
 }
 
 fn refresh_and_load_tasks(state: &AppState) -> Result<Vec<TaskSummary>> {
@@ -313,11 +315,9 @@ fn init_db(db_path: &FsPath) -> Result<()> {
 fn ingest_events(log_path: &FsPath, db_path: &FsPath) -> Result<()> {
     let conn = Connection::open(db_path)?;
     let offset = conn
-        .query_row(
-            "select value from meta where key = 'offset'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
+        .query_row("select value from meta where key = 'offset'", [], |row| {
+            row.get::<_, String>(0)
+        })
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(0);
@@ -412,7 +412,10 @@ fn build_task_summaries(events: &[EventRow]) -> Vec<TaskSummary> {
     let mut grouped: HashMap<String, Vec<EventRow>> = HashMap::new();
     for event in events {
         if let Some(task_id) = &event.task_id {
-            grouped.entry(task_id.clone()).or_default().push(event.clone());
+            grouped
+                .entry(task_id.clone())
+                .or_default()
+                .push(event.clone());
         }
     }
     let mut tasks: Vec<_> = grouped
@@ -487,15 +490,26 @@ fn build_hints(events: &[EventRow]) -> Vec<String> {
             *errors.entry(error.clone()).or_default() += 1;
         }
     }
-    let retrieval_tokens = category_tokens.get("retrieval").copied().unwrap_or_default();
-    let code_tokens = category_tokens.get("code_generation").copied().unwrap_or_default();
+    let retrieval_tokens = category_tokens
+        .get("retrieval")
+        .copied()
+        .unwrap_or_default();
+    let code_tokens = category_tokens
+        .get("code_generation")
+        .copied()
+        .unwrap_or_default();
     if retrieval_tokens > code_tokens.saturating_mul(2) && retrieval_tokens > 0 {
         hints.push("Retrieval is consuming materially more tokens than code generation. Tighten context breadth or lower max tokens for lookup-heavy routes.".to_string());
     }
     if errors.values().any(|count| *count >= 2) {
         hints.push("The same error repeated in this task. Mark these calls as wasted and change strategy earlier on the next retry.".to_string());
     }
-    if category_tokens.get("wasted_calls").copied().unwrap_or_default() > 0 {
+    if category_tokens
+        .get("wasted_calls")
+        .copied()
+        .unwrap_or_default()
+        > 0
+    {
         hints.push("Failed LLM calls consumed prompt budget. Review provider selection, retry policy, or model fallback order.".to_string());
     }
     if hints.is_empty() {
@@ -508,7 +522,10 @@ fn event_tokens(event: &EventRow) -> usize {
     event
         .total_tokens_reported
         .or_else(|| {
-            match (event.prompt_tokens_estimated, event.completion_tokens_estimated) {
+            match (
+                event.prompt_tokens_estimated,
+                event.completion_tokens_estimated,
+            ) {
                 (Some(prompt), Some(completion)) => Some(prompt + completion),
                 (Some(prompt), None) => Some(prompt),
                 _ => None,

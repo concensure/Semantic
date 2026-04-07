@@ -68,7 +68,8 @@ impl TestPlanner {
     pub fn generate_tests(plan: &TestPlan, framework: &str, symbol_code: &str) -> GeneratedTests {
         let provider_toml = "[providers]\nopenai = \"https://api.openai.com/v1\"\n";
         let routing_toml = "[planning]\npreferred = [\"openai\"]\n";
-        let metrics_json = "{\"openai\":{\"success_rate\":0.9,\"latency_ms\":200,\"token_cost\":0.2}}";
+        let metrics_json =
+            "{\"openai\":{\"success_rate\":0.9,\"latency_ms\":200,\"token_cost\":0.2}}";
         let route = llm_router::LLMRouter::from_files(provider_toml, routing_toml, metrics_json)
             .ok()
             .and_then(|r| r.route(llm_router::LLMTask::Planning));
@@ -120,13 +121,15 @@ impl TestPlanner {
         };
         let mut graph = refactor_graph::RefactorGraph::from_request(&request);
         for node in &mut graph.nodes {
-            node.edit_plan.required_context.push(engine::EditContextItem {
-                file_path: rel_test_path.clone(),
-                start_line: 1,
-                end_line: 1,
-                priority: 1,
-                text: format!("insert tests for {}", plan.target_symbol),
-            });
+            node.edit_plan
+                .required_context
+                .push(engine::EditContextItem {
+                    file_path: rel_test_path.clone(),
+                    start_line: 1,
+                    end_line: 1,
+                    priority: 1,
+                    text: format!("insert tests for {}", plan.target_symbol),
+                });
         }
 
         let mut options = refactor_graph::ExecutionOptions::default();

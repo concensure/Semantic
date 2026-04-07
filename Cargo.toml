@@ -42,6 +42,9 @@ members = [
   ,"mcp_bridge"
   ,"project_summariser"
   ,"error_log"
+  ,"semantic_app"
+  ,"semantic_cli"
+  ,"test_support"
 ]
 resolver = "2"
 
@@ -71,3 +74,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "tim
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 urlencoding = "2"
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"

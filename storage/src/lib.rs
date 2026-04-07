@@ -70,11 +70,11 @@ impl TantivySymbolIndex {
         for sym in symbols {
             if writer
                 .add_document(doc!(
-                self.name => sym.name.clone(),
-                self.file => sym.file.clone(),
-                self.language => sym.language.clone(),
-                self.symbol_type => symbol_type_to_str(&sym.symbol_type).to_string(),
-            ))
+                    self.name => sym.name.clone(),
+                    self.file => sym.file.clone(),
+                    self.language => sym.language.clone(),
+                    self.symbol_type => symbol_type_to_str(&sym.symbol_type).to_string(),
+                ))
                 .is_err()
             {
                 return Ok(());
@@ -233,7 +233,11 @@ impl Storage {
         Ok(count.max(0) as usize)
     }
 
-    pub fn prune_retrieval_cache_kind(&self, cache_kind: &str, max_entries: usize) -> Result<usize> {
+    pub fn prune_retrieval_cache_kind(
+        &self,
+        cache_kind: &str,
+        max_entries: usize,
+    ) -> Result<usize> {
         let count = self.count_retrieval_cache_entries(cache_kind)?;
         if count <= max_entries {
             return Ok(0);
@@ -337,15 +341,21 @@ impl Storage {
             }
         }
 
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO dependencies(repo_id, caller_symbol, callee_symbol, file)
-                 VALUES(?1, ?2, ?3, ?4)",
-            )?;
-            for d in deps {
-                stmt.execute(params![repo_id, d.caller_symbol, d.callee_symbol, d.file])?;
-            }
-        }
+          {
+              let mut stmt = tx.prepare(
+                "INSERT INTO dependencies(repo_id, caller_symbol, callee_symbol, file, callee_file)
+                  VALUES(?1, ?2, ?3, ?4, ?5)",
+              )?;
+              for d in deps {
+                  stmt.execute(params![
+                      repo_id,
+                      d.caller_symbol,
+                      d.callee_symbol,
+                      d.file,
+                      d.callee_file
+                  ])?;
+              }
+          }
 
         let mut inserted_logic_nodes = Vec::new();
         {
@@ -399,8 +409,18 @@ impl Storage {
             }
         }
 
-        insert_flow_edges_tx(&tx, "control_flow_edges", control_flow_edges, &inserted_logic_nodes)?;
-        insert_flow_edges_tx(&tx, "data_flow_edges", data_flow_edges, &inserted_logic_nodes)?;
+        insert_flow_edges_tx(
+            &tx,
+            "control_flow_edges",
+            control_flow_edges,
+            &inserted_logic_nodes,
+        )?;
+        insert_flow_edges_tx(
+            &tx,
+            "data_flow_edges",
+            data_flow_edges,
+            &inserted_logic_nodes,
+        )?;
         insert_logic_clusters_tx(&tx, logic_clusters, &inserted_symbol_ids)?;
 
         tx.commit()?;
@@ -478,16 +498,26 @@ impl Storage {
 
     pub fn insert_dependencies(&self, deps: &[DependencyRecord]) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "INSERT INTO dependencies(repo_id, caller_symbol, callee_symbol, file)
-             VALUES(?1, ?2, ?3, ?4)",
+            "INSERT INTO dependencies(repo_id, caller_symbol, callee_symbol, file, callee_file)
+              VALUES(?1, ?2, ?3, ?4, ?5)",
         )?;
         for d in deps {
-            stmt.execute(params![d.repo_id, d.caller_symbol, d.callee_symbol, d.file])?;
+            stmt.execute(params![
+                d.repo_id,
+                d.caller_symbol,
+                d.callee_symbol,
+                d.file,
+                d.callee_file
+            ])?;
         }
         Ok(())
     }
 
-    pub fn insert_logic_nodes(&self, symbol_id: i64, nodes: &[LogicNodeRecord]) -> Result<Vec<i64>> {
+    pub fn insert_logic_nodes(
+        &self,
+        symbol_id: i64,
+        nodes: &[LogicNodeRecord],
+    ) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "INSERT INTO logic_nodes(symbol_id, node_type, start_line, end_line, semantic_label)
              VALUES(?1, ?2, ?3, ?4, ?5)",
@@ -564,7 +594,42 @@ impl Storage {
         Ok(collected?)
     }
 
-    pub fn get_symbol_exact(&self, name: &str, symbol_type: SymbolType) -> Result<Option<SymbolRecord>> {
+    pub fn search_symbol_by_exact_name(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<SymbolRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
+             FROM symbols
+             WHERE name = ?1 COLLATE NOCASE
+             ORDER BY name, file
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![name, limit as i64], |row| {
+            Ok(SymbolRecord {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+                name: row.get(2)?,
+                symbol_type: str_to_symbol_type(&row.get::<_, String>(3)?),
+                file: row.get(4)?,
+                start_line: row.get(5)?,
+                end_line: row.get(6)?,
+                language: row.get(7)?,
+                summary: row.get(8)?,
+                signature: row.get(9)?,
+            })
+        })?;
+
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
+    }
+
+    pub fn get_symbol_exact(
+        &self,
+        name: &str,
+        symbol_type: SymbolType,
+    ) -> Result<Option<SymbolRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
              FROM symbols WHERE name = ?1 AND type = ?2 ORDER BY id DESC LIMIT 1",
@@ -598,6 +663,33 @@ impl Storage {
         )?;
 
         let mut rows = stmt.query(params![name])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(SymbolRecord {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+                name: row.get(2)?,
+                symbol_type: str_to_symbol_type(&row.get::<_, String>(3)?),
+                file: row.get(4)?,
+                start_line: row.get(5)?,
+                end_line: row.get(6)?,
+                language: row.get(7)?,
+                summary: row.get(8)?,
+                signature: row.get(9)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_symbol_in_file(&self, name: &str, file: &str) -> Result<Option<SymbolRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_id, name, type, file, start_line, end_line, language, summary, signature
+             FROM symbols WHERE name = ?1 AND file = ?2
+             ORDER BY CASE type WHEN 'function' THEN 0 WHEN 'class' THEN 1 ELSE 2 END, id DESC
+             LIMIT 1",
+        )?;
+
+        let mut rows = stmt.query(params![name, file])?;
         if let Some(row) = rows.next()? {
             Ok(Some(SymbolRecord {
                 id: row.get(0)?,
@@ -890,7 +982,7 @@ impl Storage {
 
     pub fn get_dependencies(&self, caller: &str) -> Result<Vec<DependencyRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, caller_symbol, callee_symbol, file
+            "SELECT id, repo_id, caller_symbol, callee_symbol, file, callee_file
              FROM dependencies WHERE caller_symbol = ?1 ORDER BY callee_symbol",
         )?;
         let rows = stmt.query_map(params![caller], |row| {
@@ -900,6 +992,7 @@ impl Storage {
                 caller_symbol: row.get(2)?,
                 callee_symbol: row.get(3)?,
                 file: row.get(4)?,
+                callee_file: row.get(5)?,
             })
         })?;
         let collected: rusqlite::Result<Vec<_>> = rows.collect();
@@ -908,7 +1001,7 @@ impl Storage {
 
     pub fn list_all_dependencies(&self) -> Result<Vec<DependencyRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, caller_symbol, callee_symbol, file
+            "SELECT id, repo_id, caller_symbol, callee_symbol, file, callee_file
              FROM dependencies
              ORDER BY caller_symbol, callee_symbol, file",
         )?;
@@ -919,6 +1012,7 @@ impl Storage {
                 caller_symbol: row.get(2)?,
                 callee_symbol: row.get(3)?,
                 file: row.get(4)?,
+                callee_file: row.get(5)?,
             })
         })?;
         let collected: rusqlite::Result<Vec<_>> = rows.collect();
@@ -931,17 +1025,29 @@ impl Storage {
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol_id}"))?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT callee_symbol
+            "SELECT DISTINCT callee_symbol, file, callee_file
              FROM dependencies
-             WHERE caller_symbol = ?1
-             ORDER BY callee_symbol",
+             WHERE caller_symbol = ?1 AND file = ?2
+             ORDER BY callee_symbol, file, callee_file",
         )?;
-        let names = stmt.query_map(params![symbol.name], |row| row.get::<_, String>(0))?;
+        let names = stmt.query_map(params![symbol.name, symbol.file], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
         let names: rusqlite::Result<Vec<_>> = names.collect();
 
         let mut out = Vec::new();
-        for name in names? {
-            if let Some(neighbor) = self.get_symbol_any(&name)? {
+        for (name, dep_file, callee_file) in names? {
+            let neighbor = if let Some(callee_file) = callee_file.as_deref() {
+                self.get_symbol_in_file(&name, callee_file)?
+            } else {
+                self.get_symbol_in_file(&name, &dep_file)?
+                    .or(self.get_symbol_any(&name)?)
+            };
+            if let Some(neighbor) = neighbor {
                 out.push(neighbor);
             }
         }
@@ -961,17 +1067,33 @@ impl Storage {
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol_id}"))?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT caller_symbol
+            "SELECT DISTINCT caller_symbol, file, callee_file
              FROM dependencies
              WHERE callee_symbol = ?1
-             ORDER BY caller_symbol",
+             ORDER BY caller_symbol, file, callee_file",
         )?;
-        let names = stmt.query_map(params![symbol.name], |row| row.get::<_, String>(0))?;
+        let names = stmt.query_map(params![symbol.name], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
         let names: rusqlite::Result<Vec<_>> = names.collect();
 
         let mut out = Vec::new();
-        for name in names? {
-            if let Some(neighbor) = self.get_symbol_any(&name)? {
+        for (name, dep_file, callee_file) in names? {
+            let callee_matches = callee_file
+                .as_deref()
+                .map(|file| file == symbol.file)
+                .unwrap_or(true);
+            if !callee_matches {
+                continue;
+            }
+            if let Some(neighbor) = self
+                .get_symbol_in_file(&name, &dep_file)?
+                .or(self.get_symbol_any(&name)?)
+            {
                 out.push(neighbor);
             }
         }
@@ -985,7 +1107,11 @@ impl Storage {
         Ok(out)
     }
 
-    pub fn get_dependency_neighbors(&self, symbol_id: i64, radius: usize) -> Result<Vec<SymbolRecord>> {
+    pub fn get_dependency_neighbors(
+        &self,
+        symbol_id: i64,
+        radius: usize,
+    ) -> Result<Vec<SymbolRecord>> {
         let start = self
             .get_symbol_by_id(symbol_id)?
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol_id}"))?;
@@ -1156,7 +1282,8 @@ impl Storage {
             let mut stmt = self
                 .conn
                 .prepare("SELECT from_node_id, to_node_id FROM logic_edges ORDER BY from_node_id, to_node_id")?;
-            let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
             for row in rows {
                 let (from, to) = row?;
                 adjacency.entry(from).or_default().push(to);
@@ -1199,7 +1326,11 @@ impl Storage {
         self.symbol_index.rebuild(&symbols)
     }
 
-    pub fn tantivy_search(&self, query: &str, limit: usize) -> Result<Vec<(String, String, String)>> {
+    pub fn tantivy_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
         self.symbol_index.search(query, limit)
     }
 }
@@ -1288,10 +1419,8 @@ fn ensure_runtime_migrations(conn: &Connection) -> Result<()> {
         "ALTER TABLE control_flow_edges ADD COLUMN variable_name TEXT",
         [],
     );
-    let _ = conn.execute(
-        "ALTER TABLE symbols ADD COLUMN signature TEXT",
-        [],
-    );
+    let _ = conn.execute("ALTER TABLE symbols ADD COLUMN signature TEXT", []);
+    let _ = conn.execute("ALTER TABLE dependencies ADD COLUMN callee_file TEXT", []);
     Ok(())
 }
 
@@ -1445,10 +1574,7 @@ impl Storage {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn find_error_patterns_by_hash(
-        &self,
-        hash: &str,
-    ) -> Result<Vec<engine::ErrorPattern>> {
+    pub fn find_error_patterns_by_hash(&self, hash: &str) -> Result<Vec<engine::ErrorPattern>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, error_hash, error_kind, message, file_hint, symbol_hint, first_seen, last_seen, hit_count
              FROM error_patterns WHERE error_hash = ?1",
@@ -1672,6 +1798,7 @@ mod tests {
                     caller_symbol: "a".to_string(),
                     callee_symbol: "b".to_string(),
                     file: "src/flow.ts".to_string(),
+                    callee_file: None,
                 },
                 DependencyRecord {
                     id: None,
@@ -1679,6 +1806,7 @@ mod tests {
                     caller_symbol: "c".to_string(),
                     callee_symbol: "b".to_string(),
                     file: "src/flow.ts".to_string(),
+                    callee_file: None,
                 },
             ])
             .expect("insert dependencies");
@@ -1689,6 +1817,107 @@ mod tests {
         assert!(neighbors.iter().any(|s| s.name == "a"));
         assert!(neighbors.iter().any(|s| s.name == "c"));
     }
+
+    #[test]
+    fn duplicate_symbol_callers_resolve_within_dependency_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("db.sqlite");
+        let idx = tmp.path().join("idx");
+        let mut storage = Storage::open(&db, &idx).expect("storage open");
+
+        storage
+            .upsert_file("packages/api/src/service.ts", "typescript", "api")
+            .expect("upsert api file");
+        storage
+            .upsert_file("packages/web/src/service.ts", "typescript", "web")
+            .expect("upsert web file");
+
+        let ids = storage
+            .insert_symbols(&[
+                SymbolRecord {
+                    id: None,
+                    repo_id: 0,
+                    name: "loadConfig".to_string(),
+                    symbol_type: SymbolType::Function,
+                    file: "packages/api/src/service.ts".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    language: "typescript".to_string(),
+                    summary: "api load config".to_string(),
+                    signature: Some("loadConfig()".to_string()),
+                },
+                SymbolRecord {
+                    id: None,
+                    repo_id: 0,
+                    name: "buildClient".to_string(),
+                    symbol_type: SymbolType::Function,
+                    file: "packages/api/src/service.ts".to_string(),
+                    start_line: 5,
+                    end_line: 7,
+                    language: "typescript".to_string(),
+                    summary: "build client".to_string(),
+                    signature: Some("buildClient()".to_string()),
+                },
+                SymbolRecord {
+                    id: None,
+                    repo_id: 0,
+                    name: "loadConfig".to_string(),
+                    symbol_type: SymbolType::Function,
+                    file: "packages/web/src/service.ts".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    language: "typescript".to_string(),
+                    summary: "web load config".to_string(),
+                    signature: Some("loadConfig()".to_string()),
+                },
+                SymbolRecord {
+                    id: None,
+                    repo_id: 0,
+                    name: "renderApp".to_string(),
+                    symbol_type: SymbolType::Function,
+                    file: "packages/web/src/service.ts".to_string(),
+                    start_line: 5,
+                    end_line: 7,
+                    language: "typescript".to_string(),
+                    summary: "render app".to_string(),
+                    signature: Some("renderApp()".to_string()),
+                },
+            ])
+            .expect("insert duplicate-name symbols");
+
+        storage
+            .insert_dependencies(&[
+                DependencyRecord {
+                    id: None,
+                    repo_id: 0,
+                    caller_symbol: "buildClient".to_string(),
+                    callee_symbol: "loadConfig".to_string(),
+                    file: "packages/api/src/service.ts".to_string(),
+                    callee_file: Some("packages/api/src/service.ts".to_string()),
+                },
+                DependencyRecord {
+                    id: None,
+                    repo_id: 0,
+                    caller_symbol: "renderApp".to_string(),
+                    callee_symbol: "loadConfig".to_string(),
+                    file: "packages/web/src/service.ts".to_string(),
+                    callee_file: Some("packages/web/src/service.ts".to_string()),
+                },
+            ])
+            .expect("insert dependencies");
+
+        let api_callers = storage
+            .get_symbol_callers(ids[0])
+            .expect("api loadConfig callers");
+        assert_eq!(api_callers.len(), 1);
+        assert_eq!(api_callers[0].name, "buildClient");
+        assert_eq!(api_callers[0].file, "packages/api/src/service.ts");
+
+        let web_callers = storage
+            .get_symbol_callers(ids[2])
+            .expect("web loadConfig callers");
+        assert_eq!(web_callers.len(), 1);
+        assert_eq!(web_callers[0].name, "renderApp");
+        assert_eq!(web_callers[0].file, "packages/web/src/service.ts");
+    }
 }
-
-

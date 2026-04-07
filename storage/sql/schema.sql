@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
     repo_id INTEGER NOT NULL DEFAULT 0,
     caller_symbol TEXT NOT NULL,
     callee_symbol TEXT NOT NULL,
-    file TEXT NOT NULL
+    file TEXT NOT NULL,
+    callee_file TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_dependencies_caller ON dependencies(caller_symbol);
 

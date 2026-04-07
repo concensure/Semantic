@@ -19,6 +19,40 @@ pub struct TestGap {
 pub struct TestCoverageAnalyzer;
 
 impl TestCoverageAnalyzer {
+    pub fn has_gap_for_symbol(storage: &storage::Storage, symbol_name: &str) -> Result<bool> {
+        let sym_name = symbol_name.to_lowercase();
+        let files = storage.list_files()?;
+        let test_files = files
+            .into_iter()
+            .filter(|f| {
+                let lower = f.to_lowercase();
+                lower.contains("test")
+                    || lower.contains("__tests__")
+                    || lower.ends_with("_spec.rs")
+                    || lower.ends_with(".spec.ts")
+                    || lower.ends_with(".test.ts")
+            })
+            .collect::<Vec<_>>();
+
+        let mut test_symbols = HashSet::new();
+        for file in test_files {
+            for sym in storage.file_outline(&file)? {
+                test_symbols.insert(sym.name.to_lowercase());
+            }
+        }
+
+        let has_test = test_symbols
+            .iter()
+            .any(|ts| ts.contains(&sym_name) || ts.contains("test"));
+        if !has_test {
+            return Ok(true);
+        }
+
+        let missing_edge_cases = !(sym_name.contains("edge") || sym_name.contains("boundary"));
+        let missing_error_tests = !(sym_name.contains("error") || sym_name.contains("fail"));
+        Ok(missing_edge_cases || missing_error_tests)
+    }
+
     pub fn analyze(storage: &storage::Storage) -> Result<Vec<TestGap>> {
         let symbols = storage.list_symbols()?;
         let files = storage.list_files()?;
@@ -73,7 +107,11 @@ impl TestCoverageAnalyzer {
             }
         }
 
-        gaps.sort_by(|a, b| a.file_path.cmp(&b.file_path).then_with(|| a.symbol.cmp(&b.symbol)));
+        gaps.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.symbol.cmp(&b.symbol))
+        });
         Ok(gaps)
     }
 }

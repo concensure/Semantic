@@ -6,9 +6,7 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
         let mut curr = vec![i + 1; b_chars.len() + 1];
         for (j, cb) in b_chars.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (curr[j] + 1)
-                .min(prev[j + 1] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (curr[j] + 1).min(prev[j + 1] + 1).min(prev[j] + cost);
         }
         prev = curr;
     }

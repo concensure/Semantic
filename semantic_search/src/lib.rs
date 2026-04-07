@@ -4,7 +4,11 @@ use engine::SymbolRecord;
 pub struct SemanticSearcher;
 
 impl SemanticSearcher {
-    pub fn search(storage: &storage::Storage, query: &str, limit: usize) -> Result<Vec<SymbolRecord>> {
+    pub fn search(
+        storage: &storage::Storage,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SymbolRecord>> {
         let mut symbols = storage.list_symbols()?;
         symbols.sort_by(|a, b| {
             let sa = symbol_similarity::similarity_score(query, &a.name);

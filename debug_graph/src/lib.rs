@@ -105,10 +105,7 @@ impl DebugGraphEngine {
 fn extract_symbols_from_stack_trace(stack_trace: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for frame in stack_trace {
-        let cleaned = frame
-            .replace("(", " ")
-            .replace(")", " ")
-            .replace("::", " ");
+        let cleaned = frame.replace("(", " ").replace(")", " ").replace("::", " ");
         for token in cleaned.split_whitespace() {
             let candidate = token
                 .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
@@ -201,7 +198,9 @@ fn rank_root_causes(
     let mut by_symbol_count = HashMap::<String, usize>::new();
     let mut by_symbol_recent = HashMap::<String, u64>::new();
     for rec in patch_records {
-        *by_symbol_count.entry(rec.target_symbol.clone()).or_insert(0) += 1;
+        *by_symbol_count
+            .entry(rec.target_symbol.clone())
+            .or_insert(0) += 1;
         let entry = by_symbol_recent.entry(rec.target_symbol).or_insert(0);
         *entry = (*entry).max(rec.timestamp);
     }

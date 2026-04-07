@@ -81,7 +81,10 @@ fn infer_version(content: &str) -> String {
 fn infer_endpoints(content: &str, file_lower: &str) -> Vec<Endpoint> {
     let mut endpoints = Vec::new();
     if file_lower.ends_with(".proto") {
-        for line in content.lines().filter(|l| l.trim_start().starts_with("rpc ")) {
+        for line in content
+            .lines()
+            .filter(|l| l.trim_start().starts_with("rpc "))
+        {
             let name = line.trim().split_whitespace().nth(1).unwrap_or("Unknown");
             endpoints.push(Endpoint {
                 method: "RPC".to_string(),
@@ -89,10 +92,9 @@ fn infer_endpoints(content: &str, file_lower: &str) -> Vec<Endpoint> {
             });
         }
     } else if file_lower.ends_with(".graphql") {
-        for line in content
-            .lines()
-            .filter(|l| l.trim_start().starts_with("type Query") || l.trim_start().starts_with("type Mutation"))
-        {
+        for line in content.lines().filter(|l| {
+            l.trim_start().starts_with("type Query") || l.trim_start().starts_with("type Mutation")
+        }) {
             endpoints.push(Endpoint {
                 method: "GRAPHQL".to_string(),
                 path: line.trim().to_string(),

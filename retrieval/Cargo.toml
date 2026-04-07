@@ -41,4 +41,6 @@ error_log = { path = "../error_log" }
 ast_cache = { path = "../ast_cache" }
 
 [dev-dependencies]
+indexer = { path = "../indexer" }
 tempfile = "3"
+test_support = { path = "../test_support" }

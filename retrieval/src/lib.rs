@@ -1,6 +1,5 @@
 #![recursion_limit = "512"]
 use anyhow::{anyhow, Result};
-use ast_cache::AstCache;
 use budgeter::{select_with_budget, ContextBudget, ContextItem};
 use engine::{
     LogicNodeRecord, Operation, RetrievalRequest, RetrievalResponse, SymbolRecord, SymbolType,
@@ -12,7 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use telemetry::{emit_current, metadata_pairs, task_summary_metadata, TelemetrySink};
 
@@ -23,7 +22,6 @@ pub struct RetrievalService {
     prompt_fragment_cache: Mutex<HashMap<String, CachedPrompt>>,
     perf_stats: Mutex<PerfStats>,
     telemetry: TelemetrySink,
-    ast_cache: Arc<AstCache>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +177,6 @@ impl RetrievalService {
             symbol_neighborhood_cache: Mutex::new(HashMap::new()),
             prompt_fragment_cache: Mutex::new(HashMap::new()),
             perf_stats: Mutex::new(PerfStats::default()),
-            ast_cache: Arc::new(AstCache::default()),
         };
         service.migrate_legacy_planned_context_cache();
         service
@@ -195,6 +192,10 @@ impl RetrievalService {
 
     pub fn index_revision(&self) -> u64 {
         current_index_revision(&self.repo_root)
+    }
+
+    pub fn indexed_file_count(&self) -> usize {
+        self.storage.list_files().map(|files| files.len()).unwrap_or_default()
     }
 
     pub fn load_env(&self) {
@@ -318,13 +319,31 @@ impl RetrievalService {
         let result: Result<serde_json::Value> = (|| -> Result<serde_json::Value> {
             Ok(match operation {
                 Operation::GetRepoMap => self.get_repo_map()?,
+                Operation::GetDirectoryBrief => {
+                    let path = request.path.or(request.file).unwrap_or_default();
+                    self.get_directory_brief(Some(&path))?
+                }
                 Operation::GetFileOutline => {
                     let file = request.file.ok_or_else(|| anyhow!("file is required"))?;
                     self.get_file_outline(&file)?
                 }
+                Operation::GetFileBrief => {
+                    let file = request
+                        .file
+                        .or(request.path)
+                        .ok_or_else(|| anyhow!("file is required"))?;
+                    self.get_file_brief(&file)?
+                }
                 Operation::SearchSymbol => {
                     let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
                     self.search_symbol(&name, request.limit.unwrap_or(20))?
+                }
+                Operation::GetSymbolBrief => {
+                    let name = request
+                        .name
+                        .or(request.query)
+                        .ok_or_else(|| anyhow!("name or query is required"))?;
+                    self.get_symbol_brief(&name, request.file.as_deref())?
                 }
                 Operation::GetFunction => {
                     let name = request.name.ok_or_else(|| anyhow!("name is required"))?;
@@ -386,10 +405,16 @@ impl RetrievalService {
                     let dependency_radius = request
                         .dependency_radius
                         .ok_or_else(|| anyhow!("dependency_radius is required"))?;
-                    self.get_reasoning_context(&name, logic_radius, dependency_radius)?
+                    self.get_reasoning_context(
+                        &name,
+                        request.query.as_deref(),
+                        logic_radius,
+                        dependency_radius,
+                    )?
                 }
                 Operation::GetPlannedContext => {
                     let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
+                    let query = normalize_retrieval_query(&query);
                     let requested_max_tokens = request
                         .max_tokens
                         .ok_or_else(|| anyhow!("max_tokens is required"))?;
@@ -412,10 +437,14 @@ impl RetrievalService {
                         .query
                         .or(request.name)
                         .ok_or_else(|| anyhow!("query or name is required"))?;
-                    self.search_semantic_symbol(&query, request.limit.unwrap_or(20))?
+                    self.search_semantic_symbol(
+                        &normalize_retrieval_query(&query),
+                        request.limit.unwrap_or(20),
+                    )?
                 }
                 Operation::GetWorkspaceReasoningContext => {
                     let query = request.query.ok_or_else(|| anyhow!("query is required"))?;
+                    let query = normalize_retrieval_query(&query);
                     let requested_max_tokens = request
                         .max_tokens
                         .ok_or_else(|| anyhow!("max_tokens is required"))?;
@@ -460,6 +489,13 @@ impl RetrievalService {
                 Operation::GetProjectSummary => {
                     json!({ "note": "project summary is handled by the API layer" })
                 }
+                Operation::GetSectionBrief => {
+                    let file = request
+                        .file
+                        .or(request.path)
+                        .ok_or_else(|| anyhow!("file is required"))?;
+                    self.get_section_brief(&file, request.heading.as_deref())?
+                }
                 Operation::GetErrorContext => {
                     let kind = request.error_kind.as_deref().unwrap_or("");
                     let msg = request.error_message.as_deref().unwrap_or("");
@@ -500,7 +536,7 @@ impl RetrievalService {
                     self.get_logic_clusters(&symbol)?
                 }
                 Operation::GetHybridRankedContext => {
-                    let query = request.query.unwrap_or_default();
+                    let query = normalize_retrieval_query(&request.query.unwrap_or_default());
                     let max_tokens = clamp_tokens_for_operation(
                         &self.repo_root,
                         "lookup",
@@ -1784,6 +1820,142 @@ impl RetrievalService {
         Ok(json!({ "file": file, "symbols": symbols }))
     }
 
+    pub fn get_directory_brief(&self, path: Option<&str>) -> Result<serde_json::Value> {
+        let dir = normalize_directory_path(path.unwrap_or_default());
+        let files = self.storage.list_files()?;
+        if files.is_empty() {
+            return self.get_directory_brief_from_filesystem(&dir);
+        }
+        let file_entries: Vec<serde_json::Value> = files
+            .into_iter()
+            .filter(|file| file_matches_directory(file, &dir))
+            .take(20)
+            .map(|file| {
+                let outline = self.storage.file_outline(&file).unwrap_or_default();
+                let top_symbols: Vec<String> =
+                    outline.iter().take(4).map(|symbol| symbol.name.clone()).collect();
+                json!({
+                    "name": file_name_only(&file),
+                    "file": file,
+                    "top_symbols": top_symbols,
+                    "objective": infer_file_objective_from_outline(&outline, self.repo_root.join(&file))
+                })
+            })
+            .collect();
+        Ok(json!({
+            "dir": dir,
+            "files": file_entries,
+            "objective": infer_directory_objective(&file_entries)
+        }))
+    }
+
+    pub fn get_file_brief(&self, file: &str) -> Result<serde_json::Value> {
+        let outline = self.storage.file_outline(file)?;
+        if outline.is_empty() && self.repo_root.join(file).exists() {
+            return Ok(filesystem_file_brief(&self.repo_root, file));
+        }
+        let dependencies = self
+            .storage
+            .list_all_dependencies()?
+            .into_iter()
+            .filter(|dep| dep.file == file)
+            .map(|dep| dep.callee_symbol)
+            .take(8)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "file": file,
+            "purpose": infer_file_objective_from_outline(&outline, self.repo_root.join(file)),
+            "top_symbols": outline.iter().take(6).map(compact_symbol_brief_record).collect::<Vec<_>>(),
+            "key_dependencies": dependencies,
+            "content_kind": detect_content_kind(Some(file), None),
+        }))
+    }
+
+    fn get_directory_brief_from_filesystem(&self, dir: &str) -> Result<serde_json::Value> {
+        let relative_dir = if dir == "." { PathBuf::new() } else { PathBuf::from(dir) };
+        let absolute_dir = self.repo_root.join(&relative_dir);
+        if !absolute_dir.exists() || !absolute_dir.is_dir() {
+            return Ok(json!({
+                "dir": dir,
+                "files": [],
+                "objective": "No indexed files in directory yet."
+            }));
+        }
+
+        let mut file_entries = Vec::new();
+        let mut dir_entries = fs::read_dir(&absolute_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .collect::<Vec<_>>();
+        dir_entries.sort_by_key(|entry| entry.path());
+
+        for entry in dir_entries.into_iter().take(20) {
+            let path = entry.path();
+            let relative_file = path
+                .strip_prefix(&self.repo_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !supports_brief_fallback(&relative_file) {
+                continue;
+            }
+            file_entries.push(filesystem_directory_entry(&self.repo_root, &relative_file));
+        }
+
+        Ok(json!({
+            "dir": dir,
+            "files": file_entries,
+            "objective": infer_directory_objective(&file_entries)
+        }))
+    }
+
+    pub fn get_symbol_brief(&self, name: &str, preferred_file: Option<&str>) -> Result<serde_json::Value> {
+        let symbol = if let Some(file) = preferred_file {
+            self.storage
+                .file_outline(file)?
+                .into_iter()
+                .find(|symbol| symbol.name.eq_ignore_ascii_case(name))
+                .or(self.storage.get_symbol_any(name)?)
+        } else {
+            self.storage.get_symbol_any(name)?
+        }
+        .ok_or_else(|| anyhow!("symbol not found: {name}"))?;
+        let dependencies = self
+            .storage
+            .get_dependencies(&symbol.name)?
+            .into_iter()
+            .filter(|dep| dep.file == symbol.file)
+            .map(|dep| dep.callee_symbol)
+            .take(6)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "name": symbol.name,
+            "role": infer_symbol_role(&symbol),
+            "file": symbol.file,
+            "start": symbol.start_line,
+            "end": symbol.end_line,
+            "touches": dependencies,
+            "content_kind": detect_content_kind(Some(&symbol.file), None),
+        }))
+    }
+
+    pub fn get_section_brief(&self, file: &str, heading: Option<&str>) -> Result<serde_json::Value> {
+        let path = self.repo_root.join(file);
+        let raw = fs::read_to_string(&path)?;
+        let sections = markdown_sections(&raw);
+        let section = select_markdown_section(&sections, heading)
+            .ok_or_else(|| anyhow!("section not found in document: {file}"))?;
+        Ok(json!({
+            "file": file,
+            "heading": section.heading,
+            "objective": section.objective,
+            "key_references": section.key_references,
+            "start": section.start_line,
+            "end": section.end_line,
+            "content_kind": "document",
+        }))
+    }
+
     fn get_repo_map_hierarchy(&self) -> Result<serde_json::Value> {
         let modules = self.storage.list_modules()?;
         let mut out = Vec::new();
@@ -1817,18 +1989,30 @@ impl RetrievalService {
     }
 
     fn search_symbol(&self, name: &str, limit: usize) -> Result<serde_json::Value> {
-        let hits = self.storage.tantivy_search(name, limit)?;
-        let fallback = self.storage.search_symbol_by_name(name, limit)?;
+        let mut fallback = self.storage.search_symbol_by_exact_name(name, limit)?;
+        if fallback.is_empty() {
+            fallback = self.storage.search_symbol_by_name(name, limit)?;
+        }
+        let fallback: Vec<serde_json::Value> = fallback
+            .iter()
+            .map(compact_search_symbol_record)
+            .collect();
         Ok(json!({
             "query": name,
-            "tantivy_hits": hits,
             "fallback": fallback,
         }))
     }
 
     fn search_semantic_symbol(&self, query: &str, limit: usize) -> Result<serde_json::Value> {
-        let lexical = self.storage.search_symbol_by_name(query, limit)?;
+        let mut lexical = self.storage.search_symbol_by_exact_name(query, limit)?;
+        if lexical.is_empty() {
+            lexical = self.storage.search_symbol_by_name(query, limit)?;
+        }
         if !lexical.is_empty() {
+            let lexical: Vec<serde_json::Value> = lexical
+                .iter()
+                .map(compact_search_symbol_record)
+                .collect();
             return Ok(json!({
                 "query": query,
                 "strategy": "lexical",
@@ -1836,6 +2020,10 @@ impl RetrievalService {
             }));
         }
         let semantic = semantic_search::SemanticSearcher::search(&self.storage, query, limit)?;
+        let semantic: Vec<serde_json::Value> = semantic
+            .iter()
+            .map(compact_search_symbol_record)
+            .collect();
         Ok(json!({
             "query": query,
             "strategy": "semantic_fallback",
@@ -1989,12 +2177,12 @@ impl RetrievalService {
     fn get_reasoning_context(
         &self,
         symbol_name: &str,
+        query_hint: Option<&str>,
         logic_radius: usize,
         dependency_radius: usize,
     ) -> Result<serde_json::Value> {
         let symbol = self
-            .storage
-            .get_symbol_any(symbol_name)?
+            .select_symbol_record(symbol_name, query_hint, &[])?
             .ok_or_else(|| anyhow!("symbol not found: {symbol_name}"))?;
         let symbol_id = symbol.id.ok_or_else(|| anyhow!("symbol id missing"))?;
 
@@ -2018,82 +2206,82 @@ impl RetrievalService {
         dependency_symbols.retain(|s| s.id != Some(symbol_id));
         sort_symbols(&mut dependency_symbols);
 
-        let mut logic_spans = Vec::new();
+        let mut logic_ranges = Vec::new();
         for node in &logic_context {
             if let Some(node_id) = node.id {
                 if let Some(file) = self.storage.get_logic_node_file(node_id)? {
-                    let code = read_span(
-                        &self.repo_root,
-                        &file,
-                        node.start_line as u32,
-                        node.end_line as u32,
-                    )?;
-                    logic_spans.push(json!({
-                        "node_id": node_id,
-                        "type": node.node_type,
-                        "file": file,
-                        "start_line": node.start_line,
-                        "end_line": node.end_line,
-                        "code": code,
-                    }));
+                    logic_ranges.push((file, node.start_line, node.end_line));
                 }
             }
+        }
+        let mut logic_spans = Vec::new();
+        for (file, start_line, end_line) in merge_file_line_ranges(logic_ranges) {
+            let code = read_span(&self.repo_root, &file, start_line as u32, end_line as u32)?;
+            logic_spans.push(json!({
+                "file": file,
+                "start": start_line,
+                "end": end_line,
+                "code": code,
+            }));
         }
         logic_spans.sort_by(|a, b| {
             let af = a.get("file").and_then(|v| v.as_str()).unwrap_or_default();
             let bf = b.get("file").and_then(|v| v.as_str()).unwrap_or_default();
             let as_line = a
-                .get("start_line")
+                .get("start")
                 .and_then(|v| v.as_u64())
                 .unwrap_or_default();
             let bs_line = b
-                .get("start_line")
+                .get("start")
                 .and_then(|v| v.as_u64())
                 .unwrap_or_default();
             af.cmp(bf).then_with(|| as_line.cmp(&bs_line))
         });
 
+        let logic_coverage = collect_file_line_ranges_from_json(&logic_spans);
         let mut dependency_spans = Vec::new();
         for dep in &dependency_symbols {
-            let code = read_span(&self.repo_root, &dep.file, dep.start_line, dep.end_line)?;
-            dependency_spans.push(json!({
-                "symbol": dep,
-                "code": code,
-            }));
+            let mut item = json!({
+                "name": dep.name,
+                "file": dep.file,
+            });
+            if let Some(obj) = item.as_object_mut() {
+                if !file_line_range_is_fully_covered(
+                    &logic_coverage,
+                    &dep.file,
+                    dep.start_line as usize,
+                    dep.end_line as usize,
+                ) {
+                    let code = read_span(&self.repo_root, &dep.file, dep.start_line, dep.end_line)?;
+                    obj.insert("code".to_string(), json!(code));
+                }
+            }
+            dependency_spans.push(item);
         }
         dependency_spans.sort_by(|a, b| {
             let af = a
-                .get("symbol")
-                .and_then(|v| v.get("file"))
+                .get("file")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let bf = b
-                .get("symbol")
-                .and_then(|v| v.get("file"))
+                .get("file")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let as_line = a
-                .get("symbol")
-                .and_then(|v| v.get("start_line"))
+                .get("start")
                 .and_then(|v| v.as_u64())
                 .unwrap_or_default();
             let bs_line = b
-                .get("symbol")
-                .and_then(|v| v.get("start_line"))
+                .get("start")
                 .and_then(|v| v.as_u64())
                 .unwrap_or_default();
             af.cmp(bf).then_with(|| as_line.cmp(&bs_line))
         });
 
         Ok(json!({
-            "symbol": symbol,
-            "logic_nodes": logic_context,
+            "symbol": symbol.name,
             "logic_spans": logic_spans,
-            "dependencies": dependency_symbols,
             "dependency_spans": dependency_spans,
-            "order": ["symbol", "logic_nodes", "dependencies"],
-            "logic_radius": logic_radius,
-            "dependency_radius": dependency_radius,
         }))
     }
 
@@ -2126,7 +2314,7 @@ impl RetrievalService {
         }
 
         let symbols = self.storage.list_symbols()?;
-        let mut symbol_names: Vec<String> = symbols.into_iter().map(|s| s.name).collect();
+        let mut symbol_names: Vec<String> = symbols.iter().map(|s| s.name.clone()).collect();
         symbol_names.sort();
         symbol_names.dedup();
         let mode = MappingMode::parse(mapping_mode);
@@ -2171,8 +2359,7 @@ impl RetrievalService {
             .ok_or_else(|| anyhow!("unable to determine target symbol from query"))?;
 
         let target_symbol = self
-            .storage
-            .get_symbol_any(&plan.target_symbol)?
+            .select_symbol_record(&plan.target_symbol, Some(query), &candidate_files)?
             .ok_or_else(|| anyhow!("symbol not found: {}", plan.target_symbol))?;
         let target_id = target_symbol
             .id
@@ -2206,15 +2393,14 @@ impl RetrievalService {
             let output = json!({
                 "symbol": plan.target_symbol,
                 "intent": format!("{intent:?}").to_lowercase(),
-                "plan": plan,
+                "plan": compact_planned_context_plan(&plan),
                 "effective_breadth": breadth,
                 "small_repo_mode": self.storage.list_files()?.len() < policy.small_repo_file_threshold,
                 "single_file_fast_path": true,
                 "retrieval_strategy": "single_file_fast_path",
                 "mapping_mode": mapping_mode_key,
                 "context_phase": if mode == MappingMode::FootprintFirst { "fp_staged" } else { "legacy_full" },
-                "candidate_files": candidate_files.iter().take(5).collect::<Vec<_>>(),
-                "candidate_symbols": candidate_symbols.iter().take(5).collect::<Vec<_>>(),
+                "candidate_symbols": compact_candidate_symbols(&candidate_symbols, &plan.target_symbol),
                 "confidence_score": confidence_score,
                 "include_raw_code": include_raw_code,
                 "context": [{
@@ -2226,6 +2412,25 @@ impl RetrievalService {
                 }],
                 "cache": { "hit": false }
             });
+            if let Some(items) = output
+                .get("context")
+                .and_then(|value| value.as_array())
+                .cloned()
+            {
+                let mut trimmed = items;
+                for item in &mut trimmed {
+                    Self::trim_client_context_item_fields(item);
+                }
+                let mut output = output;
+                if let Some(obj) = output.as_object_mut() {
+                    obj.insert("context".to_string(), json!(trimmed));
+                }
+                Self::trim_planned_context_client_fields(&mut output);
+                self.store_cached_context(cache_key, output.clone(), 1024);
+                return Ok(output);
+            }
+            let mut output = output;
+            Self::trim_planned_context_client_fields(&mut output);
             self.store_cached_context(cache_key, output.clone(), 1024);
             return Ok(output);
         }
@@ -2358,7 +2563,7 @@ impl RetrievalService {
                 .then_with(|| a.module_rank.cmp(&b.module_rank))
                 .then_with(|| a.file_path.cmp(&b.file_path))
                 .then_with(|| a.start_line.cmp(&b.start_line))
-                .then_with(|| a.end_line.cmp(&b.end_line))
+                .then_with(|| b.end_line.cmp(&a.end_line))
         });
         context_items.dedup_by(|a, b| {
             a.file_path == b.file_path
@@ -2366,6 +2571,7 @@ impl RetrievalService {
                 && a.end_line == b.end_line
                 && a.priority == b.priority
         });
+        context_items = prune_context_items_by_coverage(context_items);
 
         let file_count = self.storage.list_files()?.len();
         let budget = ContextBudget {
@@ -2414,25 +2620,61 @@ impl RetrievalService {
                 })
             })
             .collect();
+        let mut assembled = assembled;
+        for item in &mut assembled {
+            Self::trim_client_context_item_fields(item);
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("priority");
+            }
+        }
 
         let output = json!({
             "symbol": plan.target_symbol,
             "intent": format!("{intent:?}").to_lowercase(),
-            "plan": plan,
+            "plan": compact_planned_context_plan(&plan),
             "effective_breadth": breadth,
             "mapping_mode": mapping_mode_key,
             "context_phase": if mode == MappingMode::FootprintFirst { "fp_staged" } else { "legacy_full" },
-            "candidate_files": candidate_files.iter().take(5).collect::<Vec<_>>(),
-            "candidate_symbols": candidate_symbols.iter().take(5).collect::<Vec<_>>(),
+            "candidate_symbols": compact_candidate_symbols(&candidate_symbols, &plan.target_symbol),
             "confidence_score": confidence_score,
             "small_repo_mode": file_count < policy.small_repo_file_threshold,
             "retrieval_strategy": "two_stage_rank_then_span_fetch",
             "include_raw_code": include_raw_code,
             "context": assembled,
+            "reused_context_count": 0,
             "cache": { "hit": false }
         });
+        let mut output = output;
+        Self::trim_planned_context_client_fields(&mut output);
         self.store_cached_context(cache_key, output.clone(), 1024);
         Ok(output)
+    }
+
+    fn trim_planned_context_client_fields(output: &mut serde_json::Value) {
+        let Some(obj) = output.as_object_mut() else {
+            return;
+        };
+        obj.remove("candidate_files");
+        obj.remove("intent");
+        obj.remove("mapping_mode");
+        obj.remove("context_phase");
+        obj.remove("small_repo_mode");
+        obj.remove("include_raw_code");
+        if obj
+            .get("cache")
+            .and_then(|value| value.get("hit"))
+            .and_then(|value| value.as_bool())
+            == Some(false)
+        {
+            obj.remove("cache");
+        }
+        if obj
+            .get("reused_context_count")
+            .and_then(|value| value.as_u64())
+            == Some(0)
+        {
+            obj.remove("reused_context_count");
+        }
     }
 
     fn build_project_footprint(&self, max_items: usize) -> Result<Vec<serde_json::Value>> {
@@ -2521,6 +2763,42 @@ impl RetrievalService {
             score += 0.1;
         }
         score.clamp(0.0, 1.0)
+    }
+
+    fn select_symbol_record(
+        &self,
+        target_symbol: &str,
+        query_hint: Option<&str>,
+        candidate_files: &[String],
+    ) -> Result<Option<SymbolRecord>> {
+        let mut matches = self.storage.search_symbol_by_exact_name(target_symbol, 64)?;
+        if matches.is_empty() {
+            matches = self
+                .storage
+                .list_symbols()?
+                .into_iter()
+                .filter(|symbol| symbol.name.eq_ignore_ascii_case(target_symbol))
+                .collect::<Vec<_>>();
+        }
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        if matches.len() == 1 {
+            return Ok(matches.pop());
+        }
+
+        let query_norm = query_hint.map(normalize_query_tokens).unwrap_or_default();
+        let query_tokens = query_norm.split_whitespace().collect::<Vec<_>>();
+
+        matches.sort_by(|a, b| {
+            let ascore = score_symbol_record_for_query(a, &query_tokens, candidate_files);
+            let bscore = score_symbol_record_for_query(b, &query_tokens, candidate_files);
+            bscore
+                .cmp(&ascore)
+                .then_with(|| a.file.cmp(&b.file))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+        });
+        Ok(matches.into_iter().next())
     }
 
     fn get_workspace_reasoning_context(
@@ -2883,15 +3161,14 @@ impl RetrievalService {
                 obj.remove("module");
                 obj.remove("priority");
             }
+            Self::trim_client_context_item_fields(item);
         }
 
         Ok(json!({
             "query": query,
             "symbol": symbol,
             "strategy": "hybrid_ranked_context",
-            "control_flow_hints": self.get_control_flow_hints(&symbol).unwrap_or_else(|_| json!({})),
-            "data_flow_hints": self.get_data_flow_hints(&symbol).unwrap_or_else(|_| json!({})),
-            "logic_clusters": clusters.get("logic_clusters").cloned().unwrap_or_else(|| json!([])),
+            "graph_details_available": true,
             "graph_rank_signals": {
                 "control_flow_edges": control_edge_count,
                 "data_flow_edges": data_edge_count,
@@ -2899,6 +3176,34 @@ impl RetrievalService {
             },
             "ranked_context": ranked_context,
         }))
+    }
+
+    fn trim_client_context_item_fields(item: &mut serde_json::Value) {
+        let Some(obj) = item.as_object_mut() else {
+            return;
+        };
+        let has_nonempty_code = obj
+            .get("code")
+            .and_then(|value| value.as_str())
+            .map(|code| !code.trim().is_empty())
+            .unwrap_or(false);
+        let remove_code = !has_nonempty_code
+            && obj
+                .get("code")
+                .and_then(|value| value.as_str())
+                .map(|code| code.trim().is_empty())
+                .unwrap_or(false);
+        if remove_code {
+            obj.remove("code");
+        }
+        let remove_raw_included = obj
+            .get("raw_included")
+            .and_then(|value| value.as_bool())
+            .map(|included| has_nonempty_code || !included)
+            .unwrap_or(false);
+        if remove_raw_included {
+            obj.remove("raw_included");
+        }
     }
 
     fn try_get_cached_context(&self, key: &str, ttl_seconds: u64) -> Option<serde_json::Value> {
@@ -3140,22 +3445,9 @@ impl RetrievalService {
             logic_radius,
             dependency_radius,
             json!({
-                "base_logic_radius": base_logic_radius,
-                "base_dependency_radius": base_dependency_radius,
                 "logic_radius": logic_radius,
                 "dependency_radius": dependency_radius,
-                "fanout": fanout,
-                "direct_dependencies": direct_deps,
-                "callers": callers,
-                "logic_nodes": logic_nodes,
-                "max_tokens": max_tokens,
-                "policy": "adaptive_case_by_case",
-                "policy_thresholds": {
-                    "high_fanout_threshold": policy.high_fanout_threshold,
-                    "low_fanout_threshold": policy.low_fanout_threshold,
-                    "dense_logic_threshold": policy.dense_logic_threshold,
-                    "sparse_logic_threshold": policy.sparse_logic_threshold,
-                }
+                "adaptive": true
             }),
         ))
     }
@@ -3396,6 +3688,46 @@ fn sort_symbols(symbols: &mut [SymbolRecord]) {
     });
 }
 
+fn compact_symbol_record(symbol: &SymbolRecord) -> serde_json::Value {
+    json!({
+        "name": symbol.name,
+        "type": symbol.symbol_type,
+        "file": symbol.file,
+        "start": symbol.start_line,
+        "end": symbol.end_line,
+    })
+}
+
+fn compact_planned_context_plan(plan: &planner::RetrievalPlan) -> serde_json::Value {
+    json!({
+        "target_symbol": plan.target_symbol,
+        "include_callers": plan.include_callers,
+        "scoped_modules": plan.scoped_modules,
+    })
+}
+
+fn compact_candidate_symbols(candidate_symbols: &[String], target_symbol: &str) -> Vec<String> {
+    if !target_symbol.is_empty() {
+        return vec![target_symbol.to_string()];
+    }
+    let mut compact = Vec::new();
+    let mut seen = HashSet::new();
+    for symbol in candidate_symbols {
+        let key = symbol.to_ascii_lowercase();
+        if seen.insert(key) {
+            compact.push(symbol.clone());
+        }
+        if compact.len() >= 2 {
+            break;
+        }
+    }
+    compact
+}
+
+fn compact_search_symbol_record(symbol: &SymbolRecord) -> serde_json::Value {
+    compact_symbol_record(symbol)
+}
+
 fn edit_type_to_transform(edit_type: &engine::EditType) -> engine::ASTTransformation {
     match edit_type {
         engine::EditType::RenameSymbol => engine::ASTTransformation::RenameSymbol,
@@ -3585,6 +3917,80 @@ fn is_identifier_char(ch: char) -> bool {
 
 fn sort_logic_nodes(nodes: &mut [LogicNodeRecord]) {
     nodes.sort_by_key(|n| (n.start_line, n.end_line, n.id.unwrap_or_default()));
+}
+
+fn merge_file_line_ranges(
+    mut ranges: Vec<(String, usize, usize)>,
+) -> Vec<(String, usize, usize)> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+    ranges.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
+    let mut merged: Vec<(String, usize, usize)> = Vec::with_capacity(ranges.len());
+    for (file, start, end) in ranges {
+        if let Some((last_file, last_start, last_end)) = merged.last_mut() {
+            if *last_file == file && start <= last_end.saturating_add(1) {
+                *last_start = (*last_start).min(start);
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((file, start, end));
+    }
+    merged
+}
+
+fn collect_file_line_ranges_from_json(
+    spans: &[serde_json::Value],
+) -> HashMap<String, Vec<(usize, usize)>> {
+    let mut grouped: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for span in spans {
+        let Some(file) = span.get("file").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(start) = span.get("start").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let Some(end) = span.get("end").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        grouped
+            .entry(file.to_string())
+            .or_default()
+            .push((start as usize, end as usize));
+    }
+    for ranges in grouped.values_mut() {
+        ranges.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    }
+    grouped
+}
+
+fn file_line_range_is_fully_covered(
+    coverage: &HashMap<String, Vec<(usize, usize)>>,
+    file: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    coverage
+        .get(file)
+        .map(|ranges| ranges.iter().any(|(cstart, cend)| *cstart <= start && *cend >= end))
+        .unwrap_or(false)
+}
+
+fn prune_context_items_by_coverage(items: Vec<ContextItem>) -> Vec<ContextItem> {
+    let mut kept: Vec<ContextItem> = Vec::with_capacity(items.len());
+    for item in items {
+        let covered = kept.iter().any(|existing| {
+            existing.file_path == item.file_path
+                && existing.priority <= item.priority
+                && existing.start_line <= item.start_line
+                && existing.end_line >= item.end_line
+        });
+        if !covered {
+            kept.push(item);
+        }
+    }
+    kept
 }
 
 #[derive(Debug, Clone)]
@@ -4150,43 +4556,6 @@ fn summarize_result(result: &serde_json::Value) -> Vec<(&'static str, serde_json
     fields
 }
 
-fn build_context_payload(planned_context: &serde_json::Value, max_chars: usize) -> String {
-    let mut out = String::new();
-    let Some(items) = planned_context.get("context").and_then(|v| v.as_array()) else {
-        return out;
-    };
-
-    for item in items {
-        if out.len() >= max_chars {
-            break;
-        }
-        let file = item
-            .get("file")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let start = item
-            .get("start")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_default();
-        let end = item.get("end").and_then(|v| v.as_u64()).unwrap_or_default();
-        let code = item
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let trimmed = if code.len() > 700 {
-            format!("{}...", &code[..700])
-        } else {
-            code.to_string()
-        };
-        let block = format!("File: {file}:{start}-{end}\n{trimmed}\n\n");
-        if out.len() + block.len() > max_chars {
-            break;
-        }
-        out.push_str(&block);
-    }
-    out
-}
-
 fn build_exact_context_payload(
     repo_root: &Path,
     ranges: &[ContextRange],
@@ -4322,6 +4691,39 @@ fn normalize_query_tokens(input: &str) -> String {
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_retrieval_query(input: &str) -> String {
+    let trimmed = input.trim();
+    for separator in [", not ", " but not ", " rather than "] {
+        if let Some((head, _)) = trimmed.split_once(separator) {
+            let head = head.trim();
+            if !head.is_empty() {
+                return head.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn score_symbol_record_for_query(
+    symbol: &SymbolRecord,
+    query_tokens: &[&str],
+    candidate_files: &[String],
+) -> i64 {
+    let file_norm = normalize_query_tokens(&symbol.file);
+    let mut score = 0i64;
+    if candidate_files.iter().any(|file| file == &symbol.file) {
+        score += 120;
+    }
+    for token in query_tokens {
+        if file_norm.split_whitespace().any(|part| part == *token) {
+            score += 20;
+        } else if file_norm.contains(token) {
+            score += 8;
+        }
+    }
+    score
 }
 
 fn infer_file_objective(path: &str, top_symbols: &[String]) -> String {
@@ -5347,14 +5749,589 @@ fn read_span(
     Ok(out.join("\n"))
 }
 
+#[derive(Debug, Clone)]
+struct MarkdownSection {
+    heading: String,
+    objective: String,
+    key_references: Vec<String>,
+    start_line: usize,
+    end_line: usize,
+}
+
+fn normalize_directory_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/").trim_matches('/').to_string();
+    if normalized.is_empty() {
+        ".".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn file_matches_directory(file: &str, dir: &str) -> bool {
+    if dir == "." {
+        return true;
+    }
+    file == dir || file.starts_with(&format!("{dir}/"))
+}
+
+fn file_name_only(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn supports_brief_fallback(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".rs")
+        || lower.ends_with(".py")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".tsx")
+        || lower.ends_with(".js")
+        || lower.ends_with(".jsx")
+        || lower.ends_with(".md")
+        || lower.ends_with(".txt")
+}
+
+fn filesystem_directory_entry(repo_root: &Path, file: &str) -> serde_json::Value {
+    let raw = fs::read_to_string(repo_root.join(file)).unwrap_or_default();
+    let top_symbols = fallback_brief_symbols(&raw, file);
+    json!({
+        "name": file_name_only(file),
+        "file": file,
+        "top_symbols": top_symbols.iter().take(4).map(|item| item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string()).collect::<Vec<_>>(),
+        "objective": infer_file_objective_from_outline(&[], repo_root.join(file))
+    })
+}
+
+fn filesystem_file_brief(repo_root: &Path, file: &str) -> serde_json::Value {
+    let raw = fs::read_to_string(repo_root.join(file)).unwrap_or_default();
+    json!({
+        "file": file,
+        "purpose": infer_file_objective_from_outline(&[], repo_root.join(file)),
+        "top_symbols": fallback_brief_symbols(&raw, file),
+        "key_dependencies": fallback_dependency_hints(&raw, file),
+        "content_kind": detect_content_kind(Some(file), None),
+    })
+}
+
+fn fallback_brief_symbols(raw: &str, file: &str) -> Vec<serde_json::Value> {
+    let content_kind = detect_content_kind(Some(file), None);
+    if content_kind == "document" {
+        return markdown_sections(raw)
+            .into_iter()
+            .take(6)
+            .map(|section| {
+                json!({
+                    "name": section.heading,
+                    "type": "section",
+                    "start": section.start_line,
+                    "end": section.end_line,
+                })
+            })
+            .collect();
+    }
+
+    raw.lines()
+        .enumerate()
+        .filter_map(|(index, line)| fallback_symbol_from_line(line, index + 1))
+        .take(6)
+        .collect()
+}
+
+fn fallback_symbol_from_line(line: &str, line_no: usize) -> Option<serde_json::Value> {
+    let trimmed = line.trim();
+    let patterns = [
+        ("export function ", "function"),
+        ("function ", "function"),
+        ("export class ", "class"),
+        ("class ", "class"),
+        ("export const ", "const"),
+        ("const ", "const"),
+        ("fn ", "function"),
+        ("pub fn ", "function"),
+        ("def ", "function"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("trait ", "trait"),
+    ];
+    for (prefix, kind) in patterns {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let name = rest
+                .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+                .find(|part| !part.is_empty())?;
+            return Some(json!({
+                "name": name,
+                "type": kind,
+                "start": line_no,
+                "end": line_no,
+            }));
+        }
+    }
+    None
+}
+
+fn fallback_dependency_hints(raw: &str, file: &str) -> Vec<String> {
+    if detect_content_kind(Some(file), None) == "document" {
+        return markdown_sections(raw)
+            .into_iter()
+            .flat_map(|section| section.key_references.into_iter())
+            .take(8)
+            .collect();
+    }
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("import ") {
+                return Some(rest.trim().to_string());
+            }
+            if let Some(rest) = trimmed.strip_prefix("from ") {
+                return Some(rest.trim().to_string());
+            }
+            if let Some(rest) = trimmed.strip_prefix("use ") {
+                return Some(rest.trim().trim_end_matches(';').to_string());
+            }
+            None
+        })
+        .take(8)
+        .collect()
+}
+
+fn infer_directory_objective(entries: &[serde_json::Value]) -> String {
+    if entries.is_empty() {
+        return "No indexed files in directory yet.".to_string();
+    }
+    let names = entries
+        .iter()
+        .filter_map(|item| item.get("name").and_then(|v| v.as_str()))
+        .take(3)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        "Indexed directory summary.".to_string()
+    } else {
+        format!("Navigation brief covering {}.", names.join(", "))
+    }
+}
+
+fn infer_file_objective_from_outline(outline: &[SymbolRecord], file_path: PathBuf) -> String {
+    if is_document_file_path(file_path.to_string_lossy().as_ref()) {
+        if let Ok(raw) = fs::read_to_string(file_path) {
+            let sections = markdown_sections(&raw);
+            if let Some(section) = sections.first() {
+                return section.objective.clone();
+            }
+        }
+        return "Document reference file.".to_string();
+    }
+    if let Some(first) = outline.first() {
+        format!("Defines {} `{}`.", symbol_kind_label(&first.symbol_type), first.name)
+    } else {
+        "Indexed source file.".to_string()
+    }
+}
+
+fn compact_symbol_brief_record(symbol: &SymbolRecord) -> serde_json::Value {
+    json!({
+        "name": symbol.name,
+        "type": symbol_kind_label(&symbol.symbol_type),
+        "start": symbol.start_line,
+        "end": symbol.end_line,
+    })
+}
+
+fn infer_symbol_role(symbol: &SymbolRecord) -> String {
+    format!(
+        "{} `{}` in `{}`",
+        symbol_kind_label(&symbol.symbol_type),
+        symbol.name,
+        symbol.file
+    )
+}
+
+fn symbol_kind_label(kind: &SymbolType) -> &'static str {
+    match kind {
+        SymbolType::Function => "function",
+        SymbolType::Class => "class",
+        SymbolType::Import => "import",
+    }
+}
+
+fn detect_content_kind(file: Option<&str>, query: Option<&str>) -> &'static str {
+    if let Some(file) = file {
+        if is_document_file_path(file) {
+            return "document";
+        }
+        return "code";
+    }
+    let lower = query.unwrap_or_default().to_ascii_lowercase();
+    if ["readme", "rules", "skill", "skills", "docs", "markdown"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "document"
+    } else {
+        "code"
+    }
+}
+
+fn is_document_file_path(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    lower.ends_with(".md")
+        || lower.ends_with(".txt")
+        || lower.ends_with(".rst")
+        || lower.ends_with(".adoc")
+}
+
+fn markdown_sections(raw: &str) -> Vec<MarkdownSection> {
+    let mut sections = Vec::new();
+    let mut current_heading = String::new();
+    let mut current_lines: Vec<String> = Vec::new();
+    let mut start_line = 1usize;
+    for (idx, line) in raw.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            if !current_heading.is_empty() {
+                sections.push(build_markdown_section(
+                    &current_heading,
+                    &current_lines,
+                    start_line,
+                    idx,
+                ));
+                current_lines.clear();
+            }
+            current_heading = line.trim_start_matches('#').trim().to_string();
+            start_line = idx + 1;
+        } else if !current_heading.is_empty() {
+            current_lines.push(line.to_string());
+        }
+    }
+    if !current_heading.is_empty() {
+        sections.push(build_markdown_section(
+            &current_heading,
+            &current_lines,
+            start_line,
+            raw.lines().count().max(start_line),
+        ));
+    }
+    sections
+}
+
+fn build_markdown_section(
+    heading: &str,
+    lines: &[String],
+    start_line: usize,
+    end_line: usize,
+) -> MarkdownSection {
+    let objective = lines
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty() && !line.starts_with('-') && !line.starts_with('*'))
+        .unwrap_or("Section reference.")
+        .to_string();
+    let key_references = lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .take(4)
+        .map(|line| line.trim_start_matches('-').trim_start_matches('*').trim().to_string())
+        .collect::<Vec<_>>();
+    MarkdownSection {
+        heading: heading.to_string(),
+        objective,
+        key_references,
+        start_line,
+        end_line,
+    }
+}
+
+fn select_markdown_section<'a>(
+    sections: &'a [MarkdownSection],
+    heading: Option<&str>,
+) -> Option<&'a MarkdownSection> {
+    let requested = heading.unwrap_or_default().trim().to_ascii_lowercase();
+    if requested.is_empty() {
+        return sections.first();
+    }
+    sections
+        .iter()
+        .find(|section| section.heading.to_ascii_lowercase().contains(&requested))
+        .or_else(|| sections.first())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{extract_replacement_code, RetrievalService};
     use engine::{
         LogicNodeRecord, LogicNodeType, Operation, RetrievalRequest, SymbolRecord, SymbolType,
     };
+    use indexer::Indexer;
     use std::fs;
+    use std::time::Instant;
     use storage::Storage;
+    use test_support::{
+        estimate_tokens_json, materialize_quality_fixture, summarize_retrieval_reports,
+        MaterializedFixture, RetrievalCase, RetrievalCaseReport,
+    };
+    use engine::RetrievalResponse;
+
+    fn fixture_service() -> (tempfile::TempDir, MaterializedFixture, RetrievalService) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("cross_stack_app").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+        let service = RetrievalService::new(repo.clone(), indexer.storage);
+        (tmp, fixture, service)
+    }
+
+    fn fixture_service_for(name: &str) -> (tempfile::TempDir, MaterializedFixture, RetrievalService) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture(name).expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+        let service = RetrievalService::new(repo.clone(), indexer.storage);
+        (tmp, fixture, service)
+    }
+
+    fn manifest_case<'a>(fixture: &'a MaterializedFixture, name: &str) -> &'a RetrievalCase {
+        fixture
+            .manifest()
+            .retrieval_cases
+            .iter()
+            .find(|case| case.name == name)
+            .expect("manifest case exists")
+    }
+
+    fn result_context_files(result: &serde_json::Value) -> Vec<String> {
+        if let Some(items) = result.get("context").and_then(|v| v.as_array()) {
+            return items
+                .iter()
+                .filter_map(|item| item.get("file").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(items) = result.get("ranked_context").and_then(|v| v.as_array()) {
+            return items
+                .iter()
+                .filter_map(|item| item.get("file").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(items) = result.get("dependency_spans").and_then(|v| v.as_array()) {
+            return items
+                .iter()
+                .filter_map(|item| {
+                    item.get("symbol")
+                        .and_then(|v| v.get("file"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .chain(
+                    result
+                        .get("logic_spans")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|item| item.get("file").and_then(|v| v.as_str()).map(|s| s.to_string())),
+                )
+                .collect();
+        }
+        if let Some(items) = result.get("fallback").and_then(|v| v.as_array()) {
+            return items
+                .iter()
+                .filter_map(|item| item.get("file").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect();
+        }
+        Vec::new()
+    }
+
+    fn run_manifest_retrieval_case(
+        service: &RetrievalService,
+        case: &RetrievalCase,
+    ) -> RetrievalResponse {
+        let operation = match case.operation.as_str() {
+            "SearchSymbol" => Operation::SearchSymbol,
+            "GetPlannedContext" => Operation::GetPlannedContext,
+            "GetReasoningContext" => Operation::GetReasoningContext,
+            "GetHybridRankedContext" => Operation::GetHybridRankedContext,
+            other => panic!("unsupported manifest retrieval operation: {other}"),
+        };
+
+        service
+            .handle(RetrievalRequest {
+                operation,
+                name: case.symbol.clone(),
+                query: case.query.clone(),
+                max_tokens: case.max_tokens,
+                logic_radius: case.logic_radius,
+                dependency_radius: case.dependency_radius,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .expect("manifest retrieval case")
+    }
+
+    fn assert_retrieval_case(result: &serde_json::Value, case: &RetrievalCase) {
+        if let Some(expected_symbol) = &case.expected_target_symbol {
+            let actual_symbol = result
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    result
+                        .get("symbol")
+                        .and_then(|v| v.get("name"))
+                        .and_then(|v| v.as_str())
+                });
+            assert_eq!(actual_symbol, Some(expected_symbol.as_str()));
+        }
+
+        let files = result_context_files(result);
+        for file in &case.must_include_files {
+            assert!(
+                files.iter().any(|value| value == file),
+                "expected retrieval output to include file {file}, got {files:?}"
+            );
+        }
+        for file in &case.must_not_include_files {
+            assert!(
+                files.iter().all(|value| value != file),
+                "expected retrieval output to exclude file {file}, got {files:?}"
+            );
+        }
+
+        if let Some(expected_top_file) = &case.expected_top_file {
+            let top_file = result
+                .get("context")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("file"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    result
+                        .get("ranked_context")
+                        .and_then(|v| v.as_array())
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.get("file"))
+                        .and_then(|v| v.as_str())
+                });
+            assert_eq!(top_file, Some(expected_top_file.as_str()));
+        }
+
+        if let Some(expected_span) = &case.expected_top_span {
+            let top_item = result
+                .get("context")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .or_else(|| {
+                    result
+                        .get("ranked_context")
+                        .and_then(|v| v.as_array())
+                        .and_then(|items| items.first())
+                })
+                .expect("top context item");
+            assert_eq!(
+                top_item.get("file").and_then(|v| v.as_str()),
+                Some(expected_span.file.as_str())
+            );
+            assert_eq!(
+                top_item.get("start").and_then(|v| v.as_u64()),
+                Some(expected_span.start_line as u64)
+            );
+            assert_eq!(
+                top_item.get("end").and_then(|v| v.as_u64()),
+                Some(expected_span.end_line as u64)
+            );
+        }
+    }
+
+    fn retrieval_case_report(
+        result: &serde_json::Value,
+        case: &RetrievalCase,
+        latency_ms: f64,
+    ) -> RetrievalCaseReport {
+        let actual_symbol = result
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                result
+                    .get("symbol")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+            });
+        let target_match = case
+            .expected_target_symbol
+            .as_deref()
+            .map(|expected| actual_symbol == Some(expected))
+            .unwrap_or(true);
+
+        let top_item = result
+            .get("context")
+            .and_then(|v| v.as_array())
+            .and_then(|items| items.first())
+            .or_else(|| {
+                result
+                    .get("ranked_context")
+                    .and_then(|v| v.as_array())
+                    .and_then(|items| items.first())
+            });
+        let top_file_match = case
+            .expected_top_file
+            .as_deref()
+            .map(|expected| {
+                top_item
+                    .and_then(|item| item.get("file"))
+                    .and_then(|v| v.as_str())
+                    == Some(expected)
+            })
+            .unwrap_or(true);
+        let top_span_match = case
+            .expected_top_span
+            .as_ref()
+            .map(|expected| {
+                top_item
+                    .and_then(|item| item.get("file"))
+                    .and_then(|v| v.as_str())
+                    == Some(expected.file.as_str())
+                    && top_item
+                        .and_then(|item| item.get("start"))
+                        .and_then(|v| v.as_u64())
+                        == Some(expected.start_line as u64)
+                    && top_item
+                        .and_then(|item| item.get("end"))
+                        .and_then(|v| v.as_u64())
+                        == Some(expected.end_line as u64)
+            })
+            .unwrap_or(true);
+
+        let files = result_context_files(result);
+        let omission_count = case
+            .must_include_files
+            .iter()
+            .filter(|expected| !files.iter().any(|actual| actual == *expected))
+            .count();
+        let overfetch_count = case
+            .must_not_include_files
+            .iter()
+            .filter(|forbidden| files.iter().any(|actual| actual == *forbidden))
+            .count();
+
+        RetrievalCaseReport {
+            case_name: case.name.clone(),
+            operation_bucket: case.operation.clone(),
+            target_match,
+            top_file_match,
+            top_span_match,
+            omission_count,
+            overfetch_count,
+            latency_ms,
+            approx_tokens: estimate_tokens_json(result),
+        }
+    }
 
     #[test]
     fn returns_code_span_for_function() {
@@ -5430,6 +6407,74 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         assert!(code.contains("retryRequest"));
+    }
+
+    #[test]
+    fn search_symbol_returns_fixture_symbol_from_real_index() {
+        let (_tmp, _fixture, service) = fixture_service();
+        let resp = service
+            .handle(RetrievalRequest {
+                operation: Operation::SearchSymbol,
+                name: Some("retry".into()),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .expect("search symbol");
+
+        let fallback = resp
+            .result
+            .get("fallback")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(
+            !fallback.is_empty(),
+            "search should return exact fallback hits for a known indexed symbol"
+        );
+        assert!(
+            fallback.iter().any(|hit| {
+                hit.get("name").and_then(|v| v.as_str()) == Some("retryRequest")
+                    && hit.get("start").and_then(|v| v.as_u64()) == Some(11)
+                    && hit.get("end").and_then(|v| v.as_u64()) == Some(14)
+            }),
+            "fallback search should preserve exact indexed span for retryRequest"
+        );
+    }
+
+    #[test]
+    fn get_code_span_returns_exact_fixture_lines() {
+        let (_tmp, _fixture, service) = fixture_service();
+        let resp = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetCodeSpan,
+                file: Some("src/api/client.ts".into()),
+                start_line: Some(3),
+                end_line: Some(7),
+                ..Default::default()
+            })
+            .expect("get code span");
+
+        assert_eq!(
+            resp.result.get("file").and_then(|v| v.as_str()),
+            Some("src/api/client.ts")
+        );
+        assert_eq!(
+            resp.result.get("start_line").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            resp.result.get("end_line").and_then(|v| v.as_u64()),
+            Some(7)
+        );
+        let code = resp
+            .result
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(code.contains("if (Math.random() > 0.5)"));
+        assert!(code.contains("return retryRequest(async () => 2);"));
+        assert!(!code.contains("import { retryRequest }"));
     }
 
     #[test]
@@ -5586,6 +6631,7 @@ mod tests {
                         caller_symbol: "a".into(),
                         callee_symbol: "b".into(),
                         file: "src/flow.ts".into(),
+                        callee_file: Some("src/flow.ts".into()),
                     },
                     engine::DependencyRecord {
                         id: None,
@@ -5593,6 +6639,7 @@ mod tests {
                         caller_symbol: "a".into(),
                         callee_symbol: "c".into(),
                         file: "src/flow.ts".into(),
+                        callee_file: Some("src/flow.ts".into()),
                     },
                     engine::DependencyRecord {
                         id: None,
@@ -5600,6 +6647,7 @@ mod tests {
                         caller_symbol: "c".into(),
                         callee_symbol: "b".into(),
                         file: "src/flow.ts".into(),
+                        callee_file: Some("src/flow.ts".into()),
                     },
                 ],
                 &[
@@ -5683,6 +6731,74 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_context_uses_real_indexed_dependencies_and_logic_spans() {
+        let (_tmp, _fixture, service) = fixture_service();
+        let resp = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("fetchData".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("reasoning context");
+
+        assert_eq!(
+            resp.result.get("symbol").and_then(|v| v.as_str()),
+            Some("fetchData")
+        );
+        let logic_spans = resp
+            .result
+            .get("logic_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            logic_spans.iter().any(|span| {
+                span.get("file").and_then(|v| v.as_str()) == Some("src/api/client.ts")
+                    && span
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .contains("return retryRequest")
+            }),
+            "reasoning context should include fetchData logic spans from the indexed file"
+        );
+
+        let dependency_spans = resp
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().any(|dep| {
+                dep.get("name").and_then(|v| v.as_str()) == Some("retryRequest")
+                    && dep
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        == Some("src/utils/retry.ts")
+                    && dep
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .contains("new RetryService")
+            }),
+            "dependency spans should include the exact retryRequest body"
+        );
+        assert!(
+            dependency_spans.iter().all(|dep| dep.get("type").is_none()),
+            "reasoning dependency spans should omit redundant symbol type metadata"
+        );
+        assert!(
+            dependency_spans
+                .iter()
+                .all(|dep| dep.get("start").is_none() && dep.get("end").is_none()),
+            "reasoning dependency spans should omit redundant line range metadata"
+        );
+    }
+
+    #[test]
     fn returns_dependency_and_symbol_neighborhood() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("repo");
@@ -5747,6 +6863,7 @@ mod tests {
                         caller_symbol: "a".into(),
                         callee_symbol: "b".into(),
                         file: "src/flow.ts".into(),
+                        callee_file: Some("src/flow.ts".into()),
                     },
                     engine::DependencyRecord {
                         id: None,
@@ -5754,6 +6871,7 @@ mod tests {
                         caller_symbol: "b".into(),
                         callee_symbol: "c".into(),
                         file: "src/flow.ts".into(),
+                        callee_file: Some("src/flow.ts".into()),
                     },
                 ],
                 &[LogicNodeRecord {
@@ -5882,6 +7000,7 @@ mod tests {
                     caller_symbol: "fetchData".into(),
                     callee_symbol: "retryRequest".into(),
                     file: "src/client.ts".into(),
+                    callee_file: Some("src/client.ts".into()),
                 }],
                 &[LogicNodeRecord {
                     id: None,
@@ -5920,13 +7039,7 @@ mod tests {
             })
             .expect("planned context");
 
-        assert_eq!(
-            resp.result
-                .get("small_repo_mode")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            true
-        );
+        assert!(resp.result.get("small_repo_mode").is_none());
         let context = resp
             .result
             .get("context")
@@ -5988,6 +7101,7 @@ mod tests {
                     caller_symbol: "fetchData".into(),
                     callee_symbol: "retryRequest".into(),
                     file: "src/client.ts".into(),
+                    callee_file: Some("src/client.ts".into()),
                 }],
                 &[LogicNodeRecord {
                     id: None,
@@ -6032,13 +7146,7 @@ mod tests {
             })
             .expect("planned context");
 
-        assert_eq!(
-            resp.result
-                .get("small_repo_mode")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            false
-        );
+        assert!(resp.result.get("small_repo_mode").is_none());
         let context = resp
             .result
             .get("context")
@@ -6046,6 +7154,1261 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(context.len() <= 1);
+    }
+
+    #[test]
+    fn planned_context_targets_real_indexed_symbol_and_keeps_context_bounded() {
+        let (_tmp, _fixture, service) = fixture_service();
+        let resp = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetPlannedContext,
+                query: Some("refactor fetchData retry flow".into()),
+                max_tokens: Some(1800),
+                ..Default::default()
+            })
+            .expect("planned context");
+
+        assert_eq!(
+            resp.result.get("symbol").and_then(|v| v.as_str()),
+            Some("fetchData")
+        );
+        assert_eq!(
+            resp.result
+                .get("retrieval_strategy")
+                .and_then(|v| v.as_str()),
+            Some("two_stage_rank_then_span_fetch")
+        );
+        let context = resp
+            .result
+            .get("context")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !context.is_empty(),
+            "planned context should return at least the target span"
+        );
+        assert!(
+            context.len() <= 8,
+            "fixture repo retrieval should stay bounded for a small refactor task"
+        );
+        assert_eq!(
+            context[0].get("file").and_then(|v| v.as_str()),
+            Some("src/api/client.ts")
+        );
+        assert_eq!(
+            context[0].get("start").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            context[0].get("end").and_then(|v| v.as_u64()),
+            Some(8)
+        );
+        assert!(resp.result.get("small_repo_mode").is_none());
+        let breadth = resp
+            .result
+            .get("effective_breadth")
+            .expect("effective breadth");
+        assert_eq!(
+            breadth.get("adaptive").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(breadth.get("policy_thresholds").is_none());
+        assert!(breadth.get("base_logic_radius").is_none());
+        assert!(breadth.get("base_dependency_radius").is_none());
+        assert!(resp.result.get("candidate_files").is_none());
+        assert!(resp.result.get("cache").is_none());
+        assert!(resp.result.get("reused_context_count").is_none());
+        assert!(resp.result.get("intent").is_none());
+        assert!(resp.result.get("mapping_mode").is_none());
+        assert!(resp.result.get("context_phase").is_none());
+        assert!(resp.result.get("include_raw_code").is_none());
+        let candidate_symbols = resp
+            .result
+            .get("candidate_symbols")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(!candidate_symbols.is_empty());
+        assert!(candidate_symbols.len() <= 1);
+        assert_eq!(
+            candidate_symbols[0].as_str(),
+            Some("fetchData"),
+            "compact candidate symbols should keep the target first"
+        );
+        let plan = resp.result.get("plan").expect("plan");
+        assert!(plan.get("logic_radius").is_none());
+        assert!(plan.get("dependency_radius").is_none());
+        assert_eq!(
+            plan.get("target_symbol").and_then(|v| v.as_str()),
+            Some("fetchData")
+        );
+    }
+
+    #[test]
+    fn planned_context_omits_nested_same_file_logic_snippets_when_target_span_covers_them() {
+        let (_tmp, _fixture, service) = fixture_service_for("auth_distractor_app");
+        let resp = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetPlannedContext,
+                query: Some("fix token validation bug in buildSession".into()),
+                max_tokens: Some(1600),
+                ..Default::default()
+            })
+            .expect("planned context");
+
+        let context = resp
+            .result
+            .get("context")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(
+            context.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str()) == Some("src/auth/session.ts")
+                    && item.get("start").and_then(|v| v.as_u64()) == Some(10)
+                    && item.get("end").and_then(|v| v.as_u64()) == Some(15)
+            }),
+            "planned context should keep the target function span"
+        );
+        assert!(
+            context.iter().all(|item| {
+                !(item.get("file").and_then(|v| v.as_str()) == Some("src/auth/session.ts")
+                    && item.get("start").and_then(|v| v.as_u64()) == Some(11)
+                    && item.get("end").and_then(|v| v.as_u64()) == Some(13))
+            }),
+            "planned context should drop nested same-file logic snippets already covered by the target span"
+        );
+    }
+
+    #[test]
+    fn search_symbol_surfaces_duplicate_names_from_workspace_fixture() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("workspace_duplicate_symbols").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+        let service = RetrievalService::new(repo, indexer.storage);
+
+        let resp = service
+            .handle(RetrievalRequest {
+                operation: Operation::SearchSymbol,
+                name: Some("loadConfig".into()),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .expect("search symbol");
+        let fallback = resp
+            .result
+            .get("fallback")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(fallback.len(), 2);
+        assert!(
+            fallback.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str()) == Some("packages/api/src/service.ts")
+            })
+        );
+        assert!(
+            fallback.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str()) == Some("packages/web/src/service.ts")
+            })
+        );
+    }
+
+    #[test]
+    fn retrieval_drops_stale_paths_after_file_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("cross_stack_app").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("src").join("utils").join("retry.ts"),
+            repo.join("src").join("utils").join("retry_helper.ts"),
+        )
+        .expect("rename retry file");
+        fs::write(
+            repo.join("src").join("api").join("client.ts"),
+            concat!(
+                "import { retryRequest } from '../utils/retry_helper';\n\n",
+                "export async function fetchData() {\n",
+                "  if (Math.random() > 0.5) {\n",
+                "    return retryRequest(async () => 1);\n",
+                "  }\n",
+                "  return retryRequest(async () => 2);\n",
+                "}\n",
+            ),
+        )
+        .expect("rewrite client import");
+
+        indexer
+            .delete_file("src/utils/retry.ts")
+            .expect("delete old file from index");
+        indexer
+            .index_file(&repo, "src/utils/retry_helper.ts")
+            .expect("index renamed file");
+        indexer
+            .index_file(&repo, "src/api/client.ts")
+            .expect("reindex client");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let search = service
+            .handle(RetrievalRequest {
+                operation: Operation::SearchSymbol,
+                name: Some("retryRequest".into()),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .expect("search symbol");
+        let fallback = search
+            .result
+            .get("fallback")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            fallback.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str()) == Some("src/utils/retry_helper.ts")
+            }),
+            "search results should point to the renamed file"
+        );
+        assert!(
+            fallback.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str()) != Some("src/utils/retry.ts")
+            }),
+            "search results should not leak the deleted file path"
+        );
+
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("fetchData".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("reasoning context");
+        let dependency_spans = reasoning
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str()) == Some("src/utils/retry_helper.ts")
+            }),
+            "reasoning context should use the renamed dependency file"
+        );
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str()) != Some("src/utils/retry.ts")
+            }),
+            "reasoning context should not include stale dependency file paths"
+        );
+    }
+
+    #[test]
+    fn workspace_retrieval_drops_stale_paths_after_package_file_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("workspace_path_collisions").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("packages").join("worker").join("src").join("auth").join("init.ts"),
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("auth")
+                .join("bootstrap.ts"),
+        )
+        .expect("rename worker auth file");
+        fs::write(
+            repo.join("packages")
+                .join("worker")
+                .join("tests")
+                .join("auth.spec.ts"),
+            concat!(
+                "import { runWorker } from \"../src/auth/bootstrap\";\n\n",
+                "describe(\"runWorker\", () => {\n",
+                "  it(\"accepts worker job ids\", () => {\n",
+                "    expect(runWorker(\"job_123\")).toBeTruthy();\n",
+                "  });\n",
+                "});\n",
+            ),
+        )
+        .expect("rewrite worker test import");
+
+        indexer
+            .delete_file("packages/worker/src/auth/init.ts")
+            .expect("delete old worker auth file from index");
+        indexer
+            .index_file(&repo, "packages/worker/src/auth/bootstrap.ts")
+            .expect("index renamed worker auth file");
+        indexer
+            .index_file(&repo, "packages/worker/tests/auth.spec.ts")
+            .expect("reindex worker test");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let search = service
+            .handle(RetrievalRequest {
+                operation: Operation::SearchSymbol,
+                name: Some("initAuth".into()),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .expect("search initAuth");
+        let fallback = search
+            .result
+            .get("fallback")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            fallback.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    == Some("packages/worker/src/auth/bootstrap.ts")
+            }),
+            "search results should point to renamed worker auth file"
+        );
+        assert!(
+            fallback.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    != Some("packages/worker/src/auth/init.ts")
+            }),
+            "search results should not leak stale worker auth path"
+        );
+
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("runWorker".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("worker reasoning context");
+        let dependency_spans = reasoning
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    == Some("packages/worker/src/auth/bootstrap.ts")
+            }),
+            "reasoning context should use renamed worker dependency file"
+        );
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    != Some("packages/worker/src/auth/init.ts")
+            }),
+            "reasoning context should not include stale worker auth file paths"
+        );
+    }
+
+    #[test]
+    fn workspace_mixed_module_retrieval_drops_stale_commonjs_paths_after_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("workspace_mixed_module_noise").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("shared")
+                .join("commonjsConfig.js"),
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("shared")
+                .join("runtimeConfig.js"),
+        )
+        .expect("rename worker commonjs file");
+        fs::write(
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("auth")
+                .join("flow.ts"),
+            concat!(
+                "const configModule = require(\"../shared/runtimeConfig\");\n\n",
+                "export function initAuth() {\n",
+                "  return configModule.loadConfig();\n",
+                "}\n",
+            ),
+        )
+        .expect("rewrite worker flow import");
+
+        indexer
+            .delete_file("packages/worker/src/shared/commonjsConfig.js")
+            .expect("delete old worker commonjs file from index");
+        indexer
+            .index_file(&repo, "packages/worker/src/shared/runtimeConfig.js")
+            .expect("index renamed worker commonjs file");
+        indexer
+            .index_file(&repo, "packages/worker/src/auth/flow.ts")
+            .expect("reindex worker auth flow");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("initAuth".into()),
+                query: Some("worker initAuth commonjs config flow".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("worker reasoning context");
+        let dependency_spans = reasoning
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("symbol")
+                    .and_then(|v| v.get("file"))
+                    .and_then(|v| v.as_str())
+                    != Some("packages/worker/src/shared/commonjsConfig.js")
+            }),
+            "reasoning context should not include stale worker commonjs file paths"
+        );
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("symbol")
+                    .and_then(|v| v.get("file"))
+                    .and_then(|v| v.as_str())
+                    != Some("packages/api/src/shared/loadConfig.ts")
+            }),
+            "reasoning context should not drift into api package after worker commonjs rename"
+        );
+    }
+
+    #[test]
+    fn workspace_mixed_module_with_tests_retrieval_drops_stale_api_config_paths_after_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            materialize_quality_fixture("workspace_mixed_module_with_tests").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("packages")
+                .join("api")
+                .join("src")
+                .join("shared")
+                .join("loadConfig.ts"),
+            repo.join("packages")
+                .join("api")
+                .join("src")
+                .join("shared")
+                .join("runtimeConfig.ts"),
+        )
+        .expect("rename api config file");
+        fs::write(
+            repo.join("packages")
+                .join("api")
+                .join("src")
+                .join("auth")
+                .join("flow.ts"),
+            concat!(
+                "import { loadConfig } from \"../shared/runtimeConfig\";\n\n",
+                "export function initAuth() {\n",
+                "  return loadConfig();\n",
+                "}\n",
+            ),
+        )
+        .expect("rewrite api auth import");
+        fs::write(
+            repo.join("packages")
+                .join("api")
+                .join("tests")
+                .join("auth.spec.ts"),
+            concat!(
+                "import { initAuth } from \"../src/auth/flow\";\n\n",
+                "describe(\"api initAuth\", () => {\n",
+                "  it(\"uses api config\", () => {\n",
+                "    expect(initAuth()).toBeTruthy();\n",
+                "  });\n",
+                "});\n",
+            ),
+        )
+        .expect("rewrite api auth test");
+
+        indexer
+            .delete_file("packages/api/src/shared/loadConfig.ts")
+            .expect("delete old api config file from index");
+        indexer
+            .index_file(&repo, "packages/api/src/shared/runtimeConfig.ts")
+            .expect("index renamed api config file");
+        indexer
+            .index_file(&repo, "packages/api/src/auth/flow.ts")
+            .expect("reindex api auth flow");
+        indexer
+            .index_file(&repo, "packages/api/tests/auth.spec.ts")
+            .expect("reindex api auth test");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let planned = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetPlannedContext,
+                query: Some("fix api initAuth auth config issue".into()),
+                max_tokens: Some(1800),
+                ..Default::default()
+            })
+            .expect("api planned context");
+        let context = planned
+            .result
+            .get("context")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            context.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    != Some("packages/api/src/shared/loadConfig.ts")
+            }),
+            "planned context should not include stale api config file path"
+        );
+    }
+
+    #[test]
+    fn workspace_mixed_module_with_tests_retrieval_drops_stale_worker_commonjs_paths_after_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            materialize_quality_fixture("workspace_mixed_module_with_tests").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("shared")
+                .join("commonjsConfig.js"),
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("shared")
+                .join("runtimeCommonjsConfig.js"),
+        )
+        .expect("rename worker commonjs file");
+        fs::write(
+            repo.join("packages")
+                .join("worker")
+                .join("src")
+                .join("auth")
+                .join("flow.ts"),
+            concat!(
+                "const configModule = require(\"../shared/runtimeCommonjsConfig\");\n\n",
+                "export function initAuth() {\n",
+                "  return configModule.loadConfig();\n",
+                "}\n",
+            ),
+        )
+        .expect("rewrite worker auth import");
+        fs::write(
+            repo.join("packages")
+                .join("worker")
+                .join("tests")
+                .join("auth.spec.ts"),
+            concat!(
+                "import { initAuth } from \"../src/auth/flow\";\n\n",
+                "describe(\"worker initAuth\", () => {\n",
+                "  it(\"uses worker config\", () => {\n",
+                "    expect(initAuth()).toBeTruthy();\n",
+                "  });\n",
+                "});\n",
+            ),
+        )
+        .expect("rewrite worker auth test");
+
+        indexer
+            .delete_file("packages/worker/src/shared/commonjsConfig.js")
+            .expect("delete old worker commonjs file from index");
+        indexer
+            .index_file(&repo, "packages/worker/src/shared/runtimeCommonjsConfig.js")
+            .expect("index renamed worker commonjs file");
+        indexer
+            .index_file(&repo, "packages/worker/src/auth/flow.ts")
+            .expect("reindex worker auth flow");
+        indexer
+            .index_file(&repo, "packages/worker/tests/auth.spec.ts")
+            .expect("reindex worker auth test");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("initAuth".into()),
+                query: Some("worker initAuth commonjs config failure".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("worker reasoning context");
+        let dependency_spans = reasoning
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("symbol")
+                    .and_then(|v| v.get("file"))
+                    .and_then(|v| v.as_str())
+                    != Some("packages/worker/src/shared/commonjsConfig.js")
+            }),
+            "reasoning context should not include stale worker commonjs file path"
+        );
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_cross_stack_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("cross_stack_app");
+
+        let planned_case = manifest_case(&fixture, "planned_refactor_fetch_data");
+        let planned = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetPlannedContext,
+                query: planned_case.query.clone(),
+                max_tokens: planned_case.max_tokens,
+                ..Default::default()
+            })
+            .expect("planned context");
+        assert_retrieval_case(&planned.result, planned_case);
+
+        let reasoning_case = manifest_case(&fixture, "reasoning_fetch_data");
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: reasoning_case.symbol.clone(),
+                logic_radius: reasoning_case.logic_radius,
+                dependency_radius: reasoning_case.dependency_radius,
+                ..Default::default()
+            })
+            .expect("reasoning context");
+        assert_retrieval_case(&reasoning.result, reasoning_case);
+
+        let hybrid_case = manifest_case(&fixture, "hybrid_refactor_fetch_data");
+        let hybrid = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetHybridRankedContext,
+                query: hybrid_case.query.clone(),
+                max_tokens: hybrid_case.max_tokens,
+                ..Default::default()
+            })
+            .expect("hybrid ranked context");
+        assert_retrieval_case(&hybrid.result, hybrid_case);
+        assert_eq!(
+            hybrid.result.get("strategy").and_then(|v| v.as_str()),
+            Some("hybrid_ranked_context")
+        );
+    }
+
+    #[test]
+    fn hybrid_ranked_context_uses_compact_graph_payload() {
+        let (_tmp, _fixture, service) = fixture_service_for("cross_stack_app");
+        let hybrid = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetHybridRankedContext,
+                query: Some("refactor fetchData retry flow".to_string()),
+                max_tokens: Some(1800),
+                ..Default::default()
+            })
+            .expect("hybrid ranked context");
+
+        assert_eq!(
+            hybrid.result.get("graph_details_available").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(
+            hybrid.result.get("control_flow_hints").is_none(),
+            "hybrid ranked context should not inline bulky control flow hints"
+        );
+        assert!(
+            hybrid.result.get("data_flow_hints").is_none(),
+            "hybrid ranked context should not inline bulky data flow hints"
+        );
+        assert!(
+            hybrid.result.get("logic_clusters").is_none(),
+            "hybrid ranked context should not inline bulky logic clusters"
+        );
+        assert!(
+            hybrid
+                .result
+                .get("graph_rank_signals")
+                .and_then(|v| v.as_object())
+                .is_some(),
+            "compact graph signals should remain available"
+        );
+        assert!(
+            hybrid
+                .result
+                .get("ranked_context")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().all(|item| item.get("code").is_none()))
+                .unwrap_or(false),
+            "empty code fields should be trimmed from ranked context items"
+        );
+        assert!(
+            hybrid
+                .result
+                .get("ranked_context")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().all(|item| item.get("raw_included").is_none()))
+                .unwrap_or(false),
+            "default raw_included=false flags should be trimmed from ranked context items"
+        );
+    }
+
+    #[test]
+    fn reasoning_context_uses_compact_span_first_payload() {
+        let (_tmp, _fixture, service) = fixture_service_for("cross_stack_app");
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("fetchData".to_string()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("reasoning context");
+
+        assert!(
+            reasoning.result.get("logic_nodes").is_none(),
+            "reasoning context should not inline duplicate logic node arrays"
+        );
+        assert!(
+            reasoning.result.get("dependencies").is_none(),
+            "reasoning context should not inline duplicate dependency arrays"
+        );
+        assert!(reasoning.result.get("reasoning_signals").is_none());
+        assert!(reasoning.result.get("logic_radius").is_none());
+        assert!(reasoning.result.get("dependency_radius").is_none());
+        assert!(
+            reasoning
+                .result
+                .get("logic_spans")
+                .and_then(|v| v.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false),
+            "reasoning context should still include precise logic spans"
+        );
+        assert!(
+            reasoning
+                .result
+                .get("dependency_spans")
+                .and_then(|v| v.as_array())
+                .is_some(),
+            "reasoning context should still include dependency spans"
+        );
+    }
+
+    #[test]
+    fn reasoning_context_merges_overlapping_logic_spans_by_file() {
+        let (_tmp, _fixture, service) = fixture_service_for("cross_stack_app");
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("fetchData".to_string()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("reasoning context");
+
+        let fetch_data_spans = reasoning
+            .result
+            .get("logic_spans")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items.iter()
+                    .filter(|item| {
+                        item.get("file").and_then(|v| v.as_str()) == Some("src/api/client.ts")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        assert_eq!(
+            fetch_data_spans.len(),
+            1,
+            "reasoning context should merge overlapping logic spans from the same file"
+        );
+        assert!(
+            fetch_data_spans[0]
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("retryRequest"),
+            "merged logic span should preserve the fetchData logic body"
+        );
+    }
+
+
+    #[test]
+    fn manifest_duplicate_symbol_search_case_holds() {
+        let (_tmp, fixture, service) = fixture_service_for("workspace_duplicate_symbols");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            let report = retrieval_case_report(&result.result, case, 0.0);
+
+            assert!(
+                report.target_match,
+                "workspace retrieval target mismatch for case {}",
+                case.name
+            );
+            assert_eq!(
+                report.omission_count, 0,
+                "workspace retrieval omissions detected for case {}",
+                case.name
+            );
+            assert_eq!(
+                report.overfetch_count, 0,
+                "workspace retrieval overfetch detected for case {}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_auth_distractor_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("auth_distractor_app");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_workspace_path_collisions_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("workspace_path_collisions");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_workspace_shared_file_noise_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("workspace_shared_file_noise");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_cross_file_import_duplicates_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("cross_file_import_duplicates");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_import_alias_reexports_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("import_alias_reexports");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_multi_hop_export_star_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("multi_hop_export_star");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_default_export_aliases_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("default_export_aliases");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_unsupported_default_boundary_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("unsupported_default_boundary");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_unsupported_default_barrel_boundary_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("unsupported_default_barrel_boundary");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_unsupported_commonjs_boundary_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("unsupported_commonjs_boundary");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_unsupported_namespace_export_boundary_fixture() {
+        let (_tmp, fixture, service) =
+            fixture_service_for("unsupported_namespace_export_boundary");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_unsupported_commonjs_destructure_boundary_fixture() {
+        let (_tmp, fixture, service) =
+            fixture_service_for("unsupported_commonjs_destructure_boundary");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_unsupported_commonjs_object_boundary_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("unsupported_commonjs_object_boundary");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_mixed_module_pattern_noise_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("mixed_module_pattern_noise");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_workspace_mixed_module_noise_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("workspace_mixed_module_noise");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_workspace_mixed_module_with_tests_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("workspace_mixed_module_with_tests");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn manifest_golden_cases_hold_for_python_workspace_noise_fixture() {
+        let (_tmp, fixture, service) = fixture_service_for("python_workspace_noise");
+        for case in &fixture.manifest().retrieval_cases {
+            let result = run_manifest_retrieval_case(&service, case);
+            assert_retrieval_case(&result.result, case);
+        }
+    }
+
+    #[test]
+    fn python_workspace_retrieval_drops_stale_api_config_paths_after_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("python_workspace_noise").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("packages").join("api").join("config.py"),
+            repo.join("packages").join("api").join("runtime_config.py"),
+        )
+        .expect("rename api config file");
+        fs::write(
+            repo.join("packages").join("api").join("auth_flow.py"),
+            concat!(
+                "from runtime_config import load_config\n\n\n",
+                "def init_auth():\n",
+                "    return load_config()\n",
+            ),
+        )
+        .expect("rewrite api auth import");
+        fs::write(
+            repo.join("packages").join("api").join("test_auth.py"),
+            concat!(
+                "from auth_flow import init_auth\n\n\n",
+                "def test_init_auth_uses_api_config():\n",
+                "    assert init_auth()[\"source\"] == \"api\"\n",
+            ),
+        )
+        .expect("rewrite api auth test");
+
+        indexer
+            .delete_file("packages/api/config.py")
+            .expect("delete old api config from index");
+        indexer
+            .index_file(&repo, "packages/api/runtime_config.py")
+            .expect("index renamed api config");
+        indexer
+            .index_file(&repo, "packages/api/auth_flow.py")
+            .expect("reindex api auth flow");
+        indexer
+            .index_file(&repo, "packages/api/test_auth.py")
+            .expect("reindex api auth test");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("init_auth".into()),
+                query: Some("api init auth config failure".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("api python reasoning context");
+        let dependency_spans = reasoning
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str()) != Some("packages/api/config.py")
+            }),
+            "reasoning context should not include stale api python config path"
+        );
+        assert!(
+            dependency_spans.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    == Some("packages/api/runtime_config.py")
+            }),
+            "reasoning context should include renamed api python config path"
+        );
+    }
+
+    #[test]
+    fn python_workspace_retrieval_drops_stale_worker_config_paths_after_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture = materialize_quality_fixture("python_workspace_noise").expect("fixture");
+        let repo = fixture.repo_root().to_path_buf();
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let mut indexer = Indexer::new(storage);
+        indexer.index_repo(&repo).expect("index repo");
+
+        fs::rename(
+            repo.join("packages").join("worker").join("config.py"),
+            repo.join("packages").join("worker").join("runtime_config.py"),
+        )
+        .expect("rename worker config file");
+        fs::write(
+            repo.join("packages").join("worker").join("auth_flow.py"),
+            concat!(
+                "from runtime_config import load_config\n\n\n",
+                "def init_auth():\n",
+                "    return load_config()\n",
+            ),
+        )
+        .expect("rewrite worker auth import");
+        fs::write(
+            repo.join("packages").join("worker").join("test_auth.py"),
+            concat!(
+                "from auth_flow import init_auth\n\n\n",
+                "def test_init_auth_uses_worker_config():\n",
+                "    assert init_auth()[\"source\"] == \"worker\"\n",
+            ),
+        )
+        .expect("rewrite worker auth test");
+
+        indexer
+            .delete_file("packages/worker/config.py")
+            .expect("delete old worker config from index");
+        indexer
+            .index_file(&repo, "packages/worker/runtime_config.py")
+            .expect("index renamed worker config");
+        indexer
+            .index_file(&repo, "packages/worker/auth_flow.py")
+            .expect("reindex worker auth flow");
+        indexer
+            .index_file(&repo, "packages/worker/test_auth.py")
+            .expect("reindex worker auth test");
+
+        let service = RetrievalService::new(repo, indexer.storage);
+        let reasoning = service
+            .handle(RetrievalRequest {
+                operation: Operation::GetReasoningContext,
+                name: Some("init_auth".into()),
+                query: Some("worker init auth config failure".into()),
+                logic_radius: Some(1),
+                dependency_radius: Some(2),
+                ..Default::default()
+            })
+            .expect("worker python reasoning context");
+        let dependency_spans = reasoning
+            .result
+            .get("dependency_spans")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str()) != Some("packages/worker/config.py")
+            }),
+            "reasoning context should not include stale worker python config path"
+        );
+        assert!(
+            dependency_spans.iter().all(|item| {
+                item.get("file").and_then(|v| v.as_str()) != Some("packages/api/config.py")
+            }),
+            "reasoning context should not drift into api python config path after worker rename"
+        );
+        assert!(
+            dependency_spans.iter().any(|item| {
+                item.get("file").and_then(|v| v.as_str())
+                    == Some("packages/worker/runtime_config.py")
+            }),
+            "reasoning context should include renamed worker python config path"
+        );
+    }
+
+    #[test]
+    fn retrieval_quality_summary_meets_current_fixture_bar() {
+        let (_tmp, fixture, service) = fixture_service_for("cross_stack_app");
+        let mut reports = Vec::new();
+
+        for case_name in [
+            "planned_refactor_fetch_data",
+            "reasoning_fetch_data",
+            "hybrid_refactor_fetch_data",
+        ] {
+            let case = manifest_case(&fixture, case_name);
+            let started = Instant::now();
+            let result = match case.operation.as_str() {
+                "GetPlannedContext" => service
+                    .handle(RetrievalRequest {
+                        operation: Operation::GetPlannedContext,
+                        query: case.query.clone(),
+                        max_tokens: case.max_tokens,
+                        ..Default::default()
+                    })
+                    .expect("planned context")
+                    .result,
+                "GetReasoningContext" => service
+                    .handle(RetrievalRequest {
+                        operation: Operation::GetReasoningContext,
+                        name: case.symbol.clone(),
+                        logic_radius: case.logic_radius,
+                        dependency_radius: case.dependency_radius,
+                        ..Default::default()
+                    })
+                    .expect("reasoning context")
+                    .result,
+                "GetHybridRankedContext" => service
+                    .handle(RetrievalRequest {
+                        operation: Operation::GetHybridRankedContext,
+                        query: case.query.clone(),
+                        max_tokens: case.max_tokens,
+                        ..Default::default()
+                    })
+                    .expect("hybrid context")
+                    .result,
+                other => panic!("unexpected operation in retrieval quality summary: {other}"),
+            };
+            reports.push(retrieval_case_report(
+                &result,
+                case,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ));
+        }
+
+        let summary = summarize_retrieval_reports(reports);
+        assert_eq!(summary.case_count, 3);
+        assert!(
+            summary.target_match_rate >= 1.0,
+            "target match summary too low: {:?}",
+            summary
+        );
+        assert!(
+            summary.top_file_match_rate >= 1.0,
+            "top file match summary too low: {:?}",
+            summary
+        );
+        assert!(
+            summary.top_span_match_rate >= (2.0 / 3.0),
+            "top span match summary too low: {:?}",
+            summary
+        );
+        assert!(
+            summary.omission_rate <= 0.5,
+            "omission summary too high: {:?}",
+            summary
+        );
+        assert!(
+            summary.overfetch_rate <= 0.0,
+            "overfetch summary too high: {:?}",
+            summary
+        );
+        assert!(summary.avg_latency_ms >= 0.0);
+        assert!(summary.avg_tokens > 0.0);
     }
 
     #[test]
@@ -6117,6 +8480,7 @@ mod tests {
                     caller_symbol: "fetchData".into(),
                     callee_symbol: "retryRequest".into(),
                     file: "src/api/client.ts".into(),
+                    callee_file: None,
                 }],
                 &[],
                 &[],
@@ -6275,6 +8639,156 @@ mod tests {
     }
 
     #[test]
+    fn directory_and_file_briefs_return_compact_navigation_payloads() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("src").join("auth")).expect("mkdir auth");
+        fs::write(
+            repo.join("src").join("auth").join("session.ts"),
+            "export function buildSession(){ return 1; }\nexport function validateToken(){ return true; }\n",
+        )
+        .expect("write source");
+
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let mut storage = Storage::open(&db, &idx).expect("open storage");
+        storage
+            .replace_file_index(
+                0,
+                "src/auth/session.ts",
+                "typescript",
+                "x",
+                &[
+                    SymbolRecord {
+                        id: None,
+                        repo_id: 0,
+                        name: "buildSession".into(),
+                        symbol_type: SymbolType::Function,
+                        file: "src/auth/session.ts".into(),
+                        start_line: 1,
+                        end_line: 1,
+                        language: "typescript".into(),
+                        summary: "Function buildSession".into(),
+                        signature: None,
+                    },
+                    SymbolRecord {
+                        id: None,
+                        repo_id: 0,
+                        name: "validateToken".into(),
+                        symbol_type: SymbolType::Function,
+                        file: "src/auth/session.ts".into(),
+                        start_line: 2,
+                        end_line: 2,
+                        language: "typescript".into(),
+                        summary: "Function validateToken".into(),
+                        signature: None,
+                    },
+                ],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .expect("replace");
+
+        let service = RetrievalService::new(repo, storage);
+        let directory = service
+            .get_directory_brief(Some("src/auth"))
+            .expect("directory brief");
+        assert_eq!(directory.get("dir").and_then(|v| v.as_str()), Some("src/auth"));
+        assert!(
+            directory
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        );
+
+        let file = service
+            .get_file_brief("src/auth/session.ts")
+            .expect("file brief");
+        assert_eq!(
+            file.get("content_kind").and_then(|v| v.as_str()),
+            Some("code")
+        );
+        assert!(
+            file.get("top_symbols")
+                .and_then(|v| v.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn section_brief_detects_markdown_sections() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("docs")).expect("mkdir docs");
+        fs::write(
+            repo.join("docs").join("rules.md"),
+            "# Rules\nFollow deterministic retrieval.\n- Prefer refs\n- Avoid raw spam\n",
+        )
+        .expect("write markdown");
+
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let service = RetrievalService::new(repo, storage);
+        let section = service
+            .get_section_brief("docs/rules.md", Some("Rules"))
+            .expect("section brief");
+        assert_eq!(
+            section.get("content_kind").and_then(|v| v.as_str()),
+            Some("document")
+        );
+        assert_eq!(section.get("heading").and_then(|v| v.as_str()), Some("Rules"));
+    }
+
+    #[test]
+    fn directory_and_file_briefs_fall_back_to_filesystem_when_repo_is_unindexed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("src").join("auth")).expect("mkdir auth");
+        fs::write(
+            repo.join("src").join("auth").join("session.ts"),
+            "export function buildSession(){ return 1; }\nexport function validateToken(){ return buildSession(); }\n",
+        )
+        .expect("write source");
+
+        let db = tmp.path().join("semantic.db");
+        let idx = tmp.path().join("tantivy");
+        let storage = Storage::open(&db, &idx).expect("open storage");
+        let service = RetrievalService::new(repo, storage);
+
+        let directory = service
+            .get_directory_brief(Some("src/auth"))
+            .expect("filesystem directory brief");
+        assert_eq!(directory.get("dir").and_then(|v| v.as_str()), Some("src/auth"));
+        assert_eq!(
+            directory
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
+
+        let file = service
+            .get_file_brief("src/auth/session.ts")
+            .expect("filesystem file brief");
+        assert_eq!(
+            file.get("content_kind").and_then(|v| v.as_str()),
+            Some("code")
+        );
+        assert!(
+            file.get("top_symbols")
+                .and_then(|v| v.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
     fn workspace_reasoning_context_returns_repositories() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("repo");
@@ -6426,6 +8940,7 @@ mod tests {
                     caller_symbol: "fetchData".into(),
                     callee_symbol: "retryRequest".into(),
                     file: "src/client.ts".into(),
+                    callee_file: Some("src/client.ts".into()),
                 }],
                 &[],
                 &[],

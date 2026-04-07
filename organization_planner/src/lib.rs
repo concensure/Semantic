@@ -54,7 +54,10 @@ pub struct OrganizationTelemetryEvent {
 pub struct OrganizationPlanner;
 
 impl OrganizationPlanner {
-    pub fn plan(refactor_origin: &str, propagation: &ChangePropagation) -> OrganizationRefactorPlan {
+    pub fn plan(
+        refactor_origin: &str,
+        propagation: &ChangePropagation,
+    ) -> OrganizationRefactorPlan {
         let mut repos = Vec::new();
         repos.push(refactor_origin.to_string());
         repos.extend(propagation.impacted_repositories.clone());
@@ -244,7 +247,10 @@ impl OrganizationPlanner {
                                 origin_repo: plan.origin_repo.clone(),
                                 repository: Some(repo.clone()),
                                 status: "success".to_string(),
-                                detail: format!("completed nodes={}", exec_status.completed_nodes.len()),
+                                detail: format!(
+                                    "completed nodes={}",
+                                    exec_status.completed_nodes.len()
+                                ),
                             },
                         )?;
                     }

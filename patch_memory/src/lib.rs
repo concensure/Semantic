@@ -89,7 +89,11 @@ impl PatchMemory {
             }
             out.push(record);
         }
-        out.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.patch_id.cmp(&b.patch_id)));
+        out.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.patch_id.cmp(&b.patch_id))
+        });
         Ok(out)
     }
 

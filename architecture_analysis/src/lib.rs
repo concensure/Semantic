@@ -64,7 +64,9 @@ impl ArchitectureAnalyzer {
         for sym in &symbols {
             if let Some(m) = storage.get_module_by_file(&sym.file)? {
                 *module_symbol_counts.entry(m.name.clone()).or_insert(0) += 1;
-                if sym.name.starts_with("get") || sym.name.starts_with("set") || sym.name.starts_with("handle")
+                if sym.name.starts_with("get")
+                    || sym.name.starts_with("set")
+                    || sym.name.starts_with("handle")
                 {
                     *module_public_fn_counts.entry(m.name).or_insert(0) += 1;
                 }
@@ -72,7 +74,10 @@ impl ArchitectureAnalyzer {
         }
 
         for m in &modules {
-            let count = module_symbol_counts.get(&m.name).copied().unwrap_or_default();
+            let count = module_symbol_counts
+                .get(&m.name)
+                .copied()
+                .unwrap_or_default();
             if count > 100 {
                 issues.push(ArchitectureIssue {
                     module: m.name.clone(),

@@ -50,6 +50,18 @@ pub struct CodeParser {
     cache: AstCache,
 }
 
+#[derive(Debug, Clone)]
+struct ImportTarget {
+    file: String,
+    source_symbol: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ImportBinding {
+    local_name: String,
+    source_symbol: Option<String>,
+}
+
 impl CodeParser {
     pub fn new() -> Self {
         Self {
@@ -82,6 +94,7 @@ impl CodeParser {
         let mut symbols = Vec::new();
         let mut dependencies = Vec::new();
         let mut logic_nodes = Vec::new();
+        let import_targets = collect_import_targets(root, content, path);
         collect_nodes(
             root,
             content,
@@ -90,9 +103,11 @@ impl CodeParser {
             &mut symbols,
             &mut dependencies,
             &mut logic_nodes,
+            &import_targets,
         );
         let (control_flow_edges, data_flow_edges, logic_clusters) =
             build_graph_artifacts(&logic_nodes, content);
+        annotate_local_dependency_targets(path, &symbols, &mut dependencies);
 
         Ok(ParsedFile {
             file: path.to_string(),
@@ -121,6 +136,7 @@ fn collect_nodes(
     symbols: &mut Vec<SymbolRecord>,
     deps: &mut Vec<DependencyRecord>,
     logic_nodes: &mut Vec<LogicNodeRecord>,
+    import_targets: &HashMap<String, ImportTarget>,
 ) {
     let kind = node.kind();
 
@@ -140,7 +156,7 @@ fn collect_nodes(
                 signature,
             });
             let symbol_ref = symbols.len() as i64;
-            collect_call_edges(node, src, file, &name, deps);
+            collect_call_edges(node, src, file, &name, deps, import_targets);
             collect_logic_nodes_in_symbol(node, src, symbol_ref, logic_nodes);
         }
     } else if is_class_node(kind) {
@@ -177,7 +193,16 @@ fn collect_nodes(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_nodes(child, src, file, language, symbols, deps, logic_nodes);
+        collect_nodes(
+            child,
+            src,
+            file,
+            language,
+            symbols,
+            deps,
+            logic_nodes,
+            import_targets,
+        );
     }
 }
 
@@ -187,16 +212,21 @@ fn collect_call_edges(
     file: &str,
     caller_name: &str,
     deps: &mut Vec<DependencyRecord>,
+    import_targets: &HashMap<String, ImportTarget>,
 ) {
     let mut stack = vec![node];
     while let Some(next) = stack.pop() {
         if is_call_node(next.kind()) {
-            if let Some(callee) = extract_call_name(next, src) {
+            if let Some((callee, import_target)) = extract_call_target(next, src, import_targets) {
                 deps.push(DependencyRecord {
                     id: None,
                     repo_id: 0,
                     caller_symbol: caller_name.to_string(),
-                    callee_symbol: callee,
+                    callee_file: import_target.as_ref().map(|target| target.file.clone()),
+                    callee_symbol: import_target
+                        .as_ref()
+                        .and_then(|target| target.source_symbol.clone())
+                        .unwrap_or_else(|| callee.clone()),
                     file: file.to_string(),
                 });
             }
@@ -205,6 +235,384 @@ fn collect_call_edges(
         let mut cursor = next.walk();
         for child in next.children(&mut cursor) {
             stack.push(child);
+        }
+    }
+}
+
+fn extract_call_target(
+    node: Node,
+    src: &str,
+    import_targets: &HashMap<String, ImportTarget>,
+) -> Option<(String, Option<ImportTarget>)> {
+    let raw = extract_call_name(node, src)?;
+    if let Some(import_target) = import_targets.get(&raw).cloned() {
+        return Some((raw, Some(import_target)));
+    }
+
+    for separator in ['.', '?'] {
+        if let Some((base, member)) = raw.rsplit_once(separator) {
+            let base = base.trim_end_matches('.');
+            let member = member.trim_start_matches('.').trim();
+            if member.is_empty() {
+                continue;
+            }
+            if let Some(import_target) = import_targets.get(base).cloned() {
+                return Some((
+                    member.to_string(),
+                    Some(ImportTarget {
+                        file: import_target.file,
+                        source_symbol: Some(member.to_string()),
+                    }),
+                ));
+            }
+        }
+    }
+
+    Some((raw, None))
+}
+
+fn collect_import_targets(root: Node, src: &str, file: &str) -> HashMap<String, ImportTarget> {
+    let mut imports = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(next) = stack.pop() {
+        if is_import_node(next.kind()) {
+            let statement = node_text(next, src);
+            if let Some((specifier, bindings)) = extract_import_binding_info(&statement) {
+                if let Some(resolved) = resolve_relative_import_path(file, &specifier) {
+                    for binding in bindings {
+                        imports.insert(
+                            binding.local_name,
+                            ImportTarget {
+                                file: resolved.clone(),
+                                source_symbol: binding.source_symbol,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        if let Some((specifier, bindings)) = extract_require_binding_info(&node_text(next, src)) {
+            if let Some(resolved) = resolve_relative_import_path(file, &specifier) {
+                for binding in bindings {
+                    imports.insert(
+                        binding.local_name,
+                        ImportTarget {
+                            file: resolved.clone(),
+                            source_symbol: binding.source_symbol,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut cursor = next.walk();
+        for child in next.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    imports
+}
+
+fn extract_import_binding_info(statement: &str) -> Option<(String, Vec<ImportBinding>)> {
+    let normalized = statement.replace('\n', " ");
+    let normalized = normalized.trim();
+    if let Some((specifier, bindings)) = extract_python_import_binding_info(normalized) {
+        return Some((specifier, bindings));
+    }
+    let import_body = normalized.strip_prefix("import ")?;
+    let (bindings, specifier_part) = import_body.split_once(" from ")?;
+    let specifier = extract_quoted_string(specifier_part.trim())?;
+    let mut identifiers = Vec::new();
+    let bindings = bindings.trim();
+
+    if let Some(start) = bindings.find('{') {
+        let prefix = bindings[..start].trim().trim_end_matches(',').trim();
+        if !prefix.is_empty() && prefix != "type" {
+            identifiers.push(ImportBinding {
+                local_name: prefix.to_string(),
+                source_symbol: Some("default".to_string()),
+            });
+        }
+        if let Some(end) = bindings.rfind('}') {
+            let named = &bindings[start + 1..end];
+            for part in named.split(',') {
+                let part = part.trim().trim_start_matches("type ").trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let (source_symbol, local_name) = part
+                    .split_once(" as ")
+                    .map(|(source, alias)| (source.trim(), alias.trim()))
+                    .unwrap_or((part, part));
+                if !local_name.is_empty() {
+                    identifiers.push(ImportBinding {
+                        local_name: local_name.to_string(),
+                        source_symbol: Some(source_symbol.to_string()),
+                    });
+                }
+            }
+        }
+    } else if let Some(alias) = bindings.strip_prefix("* as ") {
+        let alias = alias.trim();
+        if !alias.is_empty() {
+            identifiers.push(ImportBinding {
+                local_name: alias.to_string(),
+                source_symbol: None,
+            });
+        }
+    } else {
+        let binding = bindings.trim().trim_start_matches("type ").trim();
+        if !binding.is_empty() {
+            identifiers.push(ImportBinding {
+                local_name: binding.to_string(),
+                source_symbol: Some("default".to_string()),
+            });
+        }
+    }
+
+    if identifiers.is_empty() {
+        None
+    } else {
+        Some((specifier, identifiers))
+    }
+}
+
+fn extract_python_import_binding_info(statement: &str) -> Option<(String, Vec<ImportBinding>)> {
+    if let Some(import_body) = statement.strip_prefix("from ") {
+        let (specifier, bindings_part) = import_body.split_once(" import ")?;
+        let specifier = specifier.trim();
+        if specifier.is_empty() {
+            return None;
+        }
+        let bindings = parse_python_import_bindings(bindings_part)?;
+        return Some((specifier.to_string(), bindings));
+    }
+
+    if statement.contains(" from ")
+        || statement.contains('"')
+        || statement.contains('\'')
+        || statement.contains('{')
+        || statement.contains('*')
+    {
+        return None;
+    }
+
+    let import_body = statement.strip_prefix("import ")?;
+    let mut bindings = Vec::new();
+    for part in import_body.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (_, local_name) = part
+            .split_once(" as ")
+            .map(|(source, alias)| (source.trim(), alias.trim()))
+            .unwrap_or((part, part));
+        if local_name.is_empty() {
+            continue;
+        }
+        bindings.push(ImportBinding {
+            local_name: local_name.to_string(),
+            source_symbol: None,
+        });
+    }
+    if bindings.is_empty() {
+        None
+    } else {
+        Some((import_body.split_whitespace().next()?.to_string(), bindings))
+    }
+}
+
+fn parse_python_import_bindings(bindings_part: &str) -> Option<Vec<ImportBinding>> {
+    let bindings_part = bindings_part
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    let mut bindings = Vec::new();
+    for part in bindings_part.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (source_symbol, local_name) = part
+            .split_once(" as ")
+            .map(|(source, alias)| (source.trim(), alias.trim()))
+            .unwrap_or((part, part));
+        if local_name.is_empty() {
+            continue;
+        }
+        bindings.push(ImportBinding {
+            local_name: local_name.to_string(),
+            source_symbol: Some(source_symbol.to_string()),
+        });
+    }
+    if bindings.is_empty() {
+        None
+    } else {
+        Some(bindings)
+    }
+}
+
+fn extract_require_binding_info(statement: &str) -> Option<(String, Vec<ImportBinding>)> {
+    let normalized = statement.replace('\n', " ");
+    let normalized = normalized.trim().trim_end_matches(';').trim();
+    let require_marker = "= require(";
+    let marker_index = normalized.find(require_marker)?;
+    let binding_part = normalized[..marker_index].trim();
+    let binding_part = binding_part
+        .strip_prefix("const ")
+        .or_else(|| binding_part.strip_prefix("let "))
+        .or_else(|| binding_part.strip_prefix("var "))?
+        .trim();
+    let mut bindings = Vec::new();
+    if let Some(inner) = binding_part.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        for part in inner.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (source_symbol, local_name) = part
+                .split_once(':')
+                .map(|(source, alias)| (source.trim(), alias.trim()))
+                .or_else(|| part.split_once(" as ").map(|(source, alias)| (source.trim(), alias.trim())))
+                .unwrap_or((part, part));
+            if !local_name.is_empty() {
+                bindings.push(ImportBinding {
+                    local_name: local_name.to_string(),
+                    source_symbol: Some(source_symbol.to_string()),
+                });
+            }
+        }
+    } else if !binding_part.is_empty() && !binding_part.starts_with('[') {
+        bindings.push(ImportBinding {
+            local_name: binding_part.to_string(),
+            source_symbol: Some("default".to_string()),
+        });
+    }
+    let specifier_part = &normalized[marker_index + "= ".len()..];
+    let specifier = extract_quoted_string(specifier_part)?;
+    if bindings.is_empty() {
+        None
+    } else {
+        Some((specifier, bindings))
+    }
+}
+
+fn extract_quoted_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(start) = value.find(quote) {
+            let rest = &value[start + 1..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_relative_import_path(file: &str, specifier: &str) -> Option<String> {
+    let language = SupportedLanguage::from_path(file)?;
+    let base = std::path::Path::new(file).parent()?;
+    let joined = if specifier.starts_with('.') {
+        base.join(specifier)
+    } else if language == SupportedLanguage::Python && is_simple_python_module_specifier(specifier) {
+        base.join(specifier.replace('.', "/"))
+    } else {
+        return None;
+    };
+    let normalized = normalize_relative_path(&joined);
+    build_import_path_candidates(language, &normalized)
+        .into_iter()
+        .find(|candidate| !candidate.is_empty())
+}
+
+fn is_simple_python_module_specifier(specifier: &str) -> bool {
+    !specifier.is_empty()
+        && !specifier.starts_with('.')
+        && specifier
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+}
+
+fn build_import_path_candidates(language: SupportedLanguage, normalized: &str) -> Vec<String> {
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    match language {
+        SupportedLanguage::Python => {
+            let has_known_extension = trimmed.ends_with(".py");
+            if has_known_extension {
+                vec![trimmed.to_string()]
+            } else {
+                vec![
+                    format!("{trimmed}.py"),
+                    format!("{trimmed}/__init__.py"),
+                    trimmed.to_string(),
+                ]
+            }
+        }
+        SupportedLanguage::JavaScript | SupportedLanguage::TypeScript => {
+            let has_known_extension = trimmed.ends_with(".ts")
+                || trimmed.ends_with(".tsx")
+                || trimmed.ends_with(".js")
+                || trimmed.ends_with(".jsx");
+            if has_known_extension {
+                vec![trimmed.to_string()]
+            } else {
+                vec![
+                    format!("{trimmed}.ts"),
+                    format!("{trimmed}.tsx"),
+                    format!("{trimmed}.js"),
+                    format!("{trimmed}.jsx"),
+                    format!("{trimmed}/index.ts"),
+                    format!("{trimmed}/index.tsx"),
+                    format!("{trimmed}/index.js"),
+                    format!("{trimmed}/index.jsx"),
+                    trimmed.to_string(),
+                ]
+            }
+        }
+    }
+}
+
+fn normalize_relative_path(path: &std::path::Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                parts.push(value.to_string_lossy().to_string());
+            }
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Prefix(value) => {
+                parts.push(value.as_os_str().to_string_lossy().to_string());
+            }
+            std::path::Component::RootDir => {}
+        }
+    }
+    parts.join("/")
+}
+
+fn annotate_local_dependency_targets(
+    file: &str,
+    symbols: &[SymbolRecord],
+    deps: &mut [DependencyRecord],
+) {
+    let local_symbol_names: std::collections::HashSet<&str> = symbols
+        .iter()
+        .filter(|symbol| symbol.file == file)
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+
+    for dep in deps {
+        if local_symbol_names.contains(dep.callee_symbol.as_str()) {
+            dep.callee_file = Some(file.to_string());
         }
     }
 }
@@ -277,7 +685,11 @@ fn infer_semantic_label(node_type: LogicNodeType, snippet: String) -> String {
 fn build_graph_artifacts(
     logic_nodes: &[LogicNodeRecord],
     content: &str,
-) -> (Vec<FlowEdgeRecord>, Vec<FlowEdgeRecord>, Vec<LogicClusterRecord>) {
+) -> (
+    Vec<FlowEdgeRecord>,
+    Vec<FlowEdgeRecord>,
+    Vec<LogicClusterRecord>,
+) {
     let mut per_symbol: HashMap<i64, Vec<LogicNodeRecord>> = HashMap::new();
     for node in logic_nodes {
         per_symbol
@@ -392,7 +804,11 @@ fn build_data_flow_edges(
 
         if matches!(node.node_type, LogicNodeType::Assignment) {
             let (defs, uses) = split_assignment_identifiers(&snippet);
-            let defs = if defs.is_empty() { identifiers.clone() } else { defs };
+            let defs = if defs.is_empty() {
+                identifiers.clone()
+            } else {
+                defs
+            };
 
             for name in defs {
                 last_assignment.insert(
@@ -510,7 +926,10 @@ fn first_node_after_line<'a>(
     start_line: usize,
     offset: usize,
 ) -> Option<&'a LogicNodeRecord> {
-    nodes.iter().skip(offset).find(|n| n.start_line > start_line)
+    nodes
+        .iter()
+        .skip(offset)
+        .find(|n| n.start_line > start_line)
 }
 
 fn last_nested_node<'a>(
@@ -518,7 +937,8 @@ fn last_nested_node<'a>(
     parent: &LogicNodeRecord,
     idx: usize,
 ) -> Option<&'a LogicNodeRecord> {
-    nodes.iter()
+    nodes
+        .iter()
         .skip(idx + 1)
         .take_while(|n| n.start_line <= parent.end_line)
         .filter(|n| n.end_line <= parent.end_line)
@@ -531,7 +951,8 @@ fn first_matching_nested<'a>(
     idx: usize,
     kinds: &[LogicNodeType],
 ) -> Option<&'a LogicNodeRecord> {
-    nodes.iter()
+    nodes
+        .iter()
         .skip(idx + 1)
         .take_while(|n| n.start_line <= parent.end_line)
         .find(|n| kinds.contains(&n.node_type))
@@ -541,7 +962,8 @@ fn span_snippet(lines: &[&str], start_line: usize, end_line: usize) -> String {
     if start_line == 0 || end_line < start_line {
         return String::new();
     }
-    lines.iter()
+    lines
+        .iter()
         .skip(start_line.saturating_sub(1))
         .take(end_line.saturating_sub(start_line) + 1)
         .copied()
@@ -552,8 +974,8 @@ fn span_snippet(lines: &[&str], start_line: usize, end_line: usize) -> String {
 fn extract_identifiers(snippet: &str) -> Vec<String> {
     let keywords = [
         "return", "await", "throw", "true", "false", "null", "none", "self", "this", "let",
-        "const", "var", "if", "else", "for", "while", "switch", "case", "try", "catch",
-        "finally", "new",
+        "const", "var", "if", "else", "for", "while", "switch", "case", "try", "catch", "finally",
+        "new",
     ];
     snippet
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
@@ -666,7 +1088,10 @@ fn is_class_node(kind: &str) -> bool {
 }
 
 fn is_import_node(kind: &str) -> bool {
-    matches!(kind, "import_statement" | "import_from_statement" | "import_declaration")
+    matches!(
+        kind,
+        "import_statement" | "import_from_statement" | "import_declaration"
+    )
 }
 
 fn is_call_node(kind: &str) -> bool {
@@ -691,6 +1116,21 @@ mod tests {
     }
 
     #[test]
+    fn resolves_python_from_import_to_local_file_dependency() {
+        let mut parser = CodeParser::new();
+        let src = "from config import load_config\n\n\ndef init_auth():\n    return load_config()\n";
+        let parsed = parser
+            .parse("packages/api/auth_flow.py", src)
+            .expect("parse should succeed");
+        let dependency = parsed
+            .dependencies
+            .iter()
+            .find(|dep| dep.caller_symbol == "init_auth" && dep.callee_symbol == "load_config")
+            .expect("load_config dependency");
+        assert_eq!(dependency.callee_file.as_deref(), Some("packages/api/config.py"));
+    }
+
+    #[test]
     fn extracts_logic_nodes_from_async_ts() {
         let mut parser = CodeParser::new();
         let src = "async function fetchData(token) {\n  if (!token) { throw new Error('missing') }\n  await refreshToken()\n  return request()\n}\n";
@@ -698,7 +1138,11 @@ mod tests {
             .parse("client.ts", src)
             .expect("parse should succeed");
 
-        let kinds: Vec<LogicNodeType> = parsed.logic_nodes.into_iter().map(|n| n.node_type).collect();
+        let kinds: Vec<LogicNodeType> = parsed
+            .logic_nodes
+            .into_iter()
+            .map(|n| n.node_type)
+            .collect();
         assert!(kinds.contains(&LogicNodeType::Conditional));
         assert!(kinds.contains(&LogicNodeType::Throw));
         assert!(kinds.contains(&LogicNodeType::Await));

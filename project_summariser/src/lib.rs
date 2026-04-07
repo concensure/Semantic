@@ -47,11 +47,15 @@ impl<'a> ProjectSummariser<'a> {
             doc.modules.clear();
             doc.dependency_sketch = String::new();
             // Rebuild a minimal summary_text
-            let ep = doc.entry_points.iter()
-                .map(|p| std::path::Path::new(p)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(p))
+            let ep = doc
+                .entry_points
+                .iter()
+                .map(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(p)
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             doc.summary_text = format!("{}\nEntry points: {}", doc.narrative, ep);
@@ -85,10 +89,14 @@ impl<'a> ProjectSummariser<'a> {
                 set.insert(sym.file.clone());
                 if let Some(id) = sym.id {
                     if let Ok(deps) = self.storage.get_symbol_dependencies(id) {
-                        for d in &deps { set.insert(d.file.clone()); }
+                        for d in &deps {
+                            set.insert(d.file.clone());
+                        }
                     }
                     if let Ok(callers) = self.storage.get_dependency_neighbors(id, 1) {
-                        for c in &callers { set.insert(c.file.clone()); }
+                        for c in &callers {
+                            set.insert(c.file.clone());
+                        }
                     }
                 }
             }
@@ -101,9 +109,14 @@ impl<'a> ProjectSummariser<'a> {
         doc.modules.retain(|m| {
             m.get("files")
                 .and_then(|v| v.as_array())
-                .map(|files| files.iter().any(|f| {
-                    f.get("path").and_then(|p| p.as_str()).map(|p| relevant_files.contains(p)).unwrap_or(false)
-                }))
+                .map(|files| {
+                    files.iter().any(|f| {
+                        f.get("path")
+                            .and_then(|p| p.as_str())
+                            .map(|p| relevant_files.contains(p))
+                            .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false)
         });
         if doc.modules.is_empty() {
@@ -111,13 +124,22 @@ impl<'a> ProjectSummariser<'a> {
             let unfiltered = self.build_tiered(tier, include_error_hints)?;
             return Ok((unfiltered, false));
         }
-        doc.summary_text = build_markdown(&doc.narrative, &doc.modules, &doc.dependency_sketch, &doc.entry_points);
+        doc.summary_text = build_markdown(
+            &doc.narrative,
+            &doc.modules,
+            &doc.dependency_sketch,
+            &doc.entry_points,
+        );
         doc.token_estimate = (doc.summary_text.len() / 4).max(1);
         Ok((doc, true))
     }
 
     /// Build with optional recurring-issues note appended (Phase D).
-    pub fn build_with_options(&self, max_tokens: usize, include_error_hints: bool) -> Result<SummaryDocument> {
+    pub fn build_with_options(
+        &self,
+        max_tokens: usize,
+        include_error_hints: bool,
+    ) -> Result<SummaryDocument> {
         let cache_key = format!("project_summary::{max_tokens}");
         if let Some(mut cached) = self.try_get_cached(&cache_key, 3600)? {
             if include_error_hints {
@@ -135,7 +157,9 @@ impl<'a> ProjectSummariser<'a> {
 
     fn append_error_hints(&self, doc: &mut SummaryDocument) {
         // Requires error_log schema to exist; silently skip if not.
-        let Ok(patterns) = self.storage.list_error_patterns(20) else { return; };
+        let Ok(patterns) = self.storage.list_error_patterns(20) else {
+            return;
+        };
         let recurring: Vec<String> = patterns
             .into_iter()
             .filter(|p| p.hit_count >= 3)
@@ -144,7 +168,8 @@ impl<'a> ProjectSummariser<'a> {
             .collect();
         if !recurring.is_empty() {
             let note = format!("Recurring issues: {}", recurring.join(", "));
-            doc.summary_text.push_str(&format!("\n\n### Recurring Issues\n{note}\n"));
+            doc.summary_text
+                .push_str(&format!("\n\n### Recurring Issues\n{note}\n"));
             doc.narrative.push_str(&format!(" {note}."));
         }
     }
@@ -204,9 +229,13 @@ impl<'a> ProjectSummariser<'a> {
         // ── module priority: entry-point modules first, test modules last ─────
         let module_priority = |name: &str| -> u8 {
             let n = name.to_lowercase();
-            if n.contains("test") || n.contains("spec") { 2 }
-            else if n.contains("api") || n.contains("server") || n.contains("app") { 0 }
-            else { 1 }
+            if n.contains("test") || n.contains("spec") {
+                2
+            } else if n.contains("api") || n.contains("server") || n.contains("app") {
+                0
+            } else {
+                1
+            }
         };
         let mut sorted_modules = modules.clone();
         sorted_modules.sort_by_key(|m| module_priority(&m.name));
@@ -241,15 +270,15 @@ impl<'a> ProjectSummariser<'a> {
                     .map(|s| (s.clone(), *callee_count.get(s).unwrap_or(&0)))
                     .collect();
                 ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                let top_symbols: Vec<String> =
-                    ranked.into_iter().take(6).map(|(s, _)| s).collect();
+                let top_symbols: Vec<String> = ranked.into_iter().take(6).map(|(s, _)| s).collect();
 
                 let objective = infer_file_objective_rich(&mf.file_path, &top_symbols, &caller_set);
-                let purpose = purpose_sentence_rich(&mf.file_path, objective, &top_symbols, &callee_count);
+                let purpose =
+                    purpose_sentence_rich(&mf.file_path, objective, &top_symbols, &callee_count);
 
                 // Entry point: path heuristic OR graph root (never called)
-                let is_ep = is_entry_point_path(&mf.file_path)
-                    || graph_roots.contains(&mf.file_path);
+                let is_ep =
+                    is_entry_point_path(&mf.file_path) || graph_roots.contains(&mf.file_path);
                 if is_ep && !entry_points.contains(&mf.file_path) {
                     entry_points.push(mf.file_path.clone());
                 }
@@ -307,7 +336,8 @@ impl<'a> ProjectSummariser<'a> {
             total_files += 1;
         }
         if !unmodule_entries.is_empty() {
-            module_summaries.push(json!({ "name": "other", "priority": 3, "files": unmodule_entries }));
+            module_summaries
+                .push(json!({ "name": "other", "priority": 3, "files": unmodule_entries }));
         }
 
         // ── dependency sketch (module edges + hot paths) ──────────────────────
@@ -333,13 +363,17 @@ impl<'a> ProjectSummariser<'a> {
         };
 
         let narrative = build_narrative(
-            &sorted_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            &sorted_modules
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
             &entry_points,
             &dep_sketch,
             total_files,
             all_symbols.len(),
         );
-        let summary_text = build_markdown(&narrative, &module_summaries, &dep_sketch, &entry_points);
+        let summary_text =
+            build_markdown(&narrative, &module_summaries, &dep_sketch, &entry_points);
         let token_estimate = (summary_text.len() / 4).max(1);
 
         Ok(SummaryDocument {
@@ -383,7 +417,11 @@ impl<'a> ProjectSummariser<'a> {
             dependency_sketch: v["dependency_sketch"].as_str().unwrap_or("").to_string(),
             entry_points: v["entry_points"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default(),
             summary_text: v["summary_text"].as_str().unwrap_or("").to_string(),
             token_estimate: v["token_estimate"].as_u64().unwrap_or(0) as usize,
@@ -405,16 +443,19 @@ impl<'a> ProjectSummariser<'a> {
             "file_count": doc.file_count,
             "module_count": doc.module_count,
         });
-        self.storage.upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
-            cache_key: key.to_string(),
-            cache_kind: "project_summary".to_string(),
-            value_json: Some(serde_json::to_string(&value)?),
-            prompt_text: None,
-            cached_at_epoch_s: now_epoch_s(),
-            source_revision: current_index_revision(self.storage),
-        })?;
+        self.storage
+            .upsert_retrieval_cache_entry(&storage::RetrievalCacheEntry {
+                cache_key: key.to_string(),
+                cache_kind: "project_summary".to_string(),
+                value_json: Some(serde_json::to_string(&value)?),
+                prompt_text: None,
+                cached_at_epoch_s: now_epoch_s(),
+                source_revision: current_index_revision(self.storage),
+            })?;
         // Keep at most 10 project_summary entries
-        let _ = self.storage.prune_retrieval_cache_kind("project_summary", 10);
+        let _ = self
+            .storage
+            .prune_retrieval_cache_kind("project_summary", 10);
         Ok(())
     }
 }
@@ -459,23 +500,50 @@ fn infer_file_objective_rich(
     let p = path.to_lowercase();
 
     // Path-based (high confidence)
-    if p.contains("test") || p.contains("spec") { return "tests"; }
-    if p.contains("route") || p.contains("handler") || p.contains("controller") { return "api_surface"; }
-    if p.contains("api") || p.contains("server") || p.contains("endpoint") { return "api_surface"; }
-    if p.contains("store") || p.contains("repo") || p.contains("db") || p.contains("model") { return "data_layer"; }
-    if p.contains("migration") || p.contains("schema") || p.contains("seed") { return "data_layer"; }
-    if p.contains("component") || p.contains("widget") || p.contains("view") { return "ui_layer"; }
-    if p.ends_with(".tsx") || p.ends_with(".jsx") { return "ui_layer"; }
+    if p.contains("test") || p.contains("spec") {
+        return "tests";
+    }
+    if p.contains("route") || p.contains("handler") || p.contains("controller") {
+        return "api_surface";
+    }
+    if p.contains("api") || p.contains("server") || p.contains("endpoint") {
+        return "api_surface";
+    }
+    if p.contains("store") || p.contains("repo") || p.contains("db") || p.contains("model") {
+        return "data_layer";
+    }
+    if p.contains("migration") || p.contains("schema") || p.contains("seed") {
+        return "data_layer";
+    }
+    if p.contains("component") || p.contains("widget") || p.contains("view") {
+        return "ui_layer";
+    }
+    if p.ends_with(".tsx") || p.ends_with(".jsx") {
+        return "ui_layer";
+    }
 
     // Symbol-name patterns (medium confidence)
     let sym_lower: Vec<String> = top_symbols.iter().map(|s| s.to_lowercase()).collect();
-    if sym_lower.iter().any(|s| s.contains("render") || s.contains("component") || s.contains("view")) {
+    if sym_lower
+        .iter()
+        .any(|s| s.contains("render") || s.contains("component") || s.contains("view"))
+    {
         return "ui_layer";
     }
-    if sym_lower.iter().any(|s| s.contains("handler") || s.contains("route") || s.contains("endpoint")) {
+    if sym_lower
+        .iter()
+        .any(|s| s.contains("handler") || s.contains("route") || s.contains("endpoint"))
+    {
         return "api_surface";
     }
-    if sym_lower.iter().any(|s| s.contains("store") || s.contains("repo") || s.contains("query") || s.contains("insert") || s.contains("update") || s.contains("delete")) {
+    if sym_lower.iter().any(|s| {
+        s.contains("store")
+            || s.contains("repo")
+            || s.contains("query")
+            || s.contains("insert")
+            || s.contains("update")
+            || s.contains("delete")
+    }) {
         return "data_layer";
     }
 
@@ -509,11 +577,21 @@ fn purpose_sentence_rich(
         .cloned()
         .unwrap_or_else(|| filename.to_string());
 
-    let rest: Vec<&String> = top_symbols.iter().filter(|s| *s != &primary).take(3).collect();
+    let rest: Vec<&String> = top_symbols
+        .iter()
+        .filter(|s| *s != &primary)
+        .take(3)
+        .collect();
     let rest_str = if rest.is_empty() {
         String::new()
     } else {
-        format!("; also {}", rest.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+        format!(
+            "; also {}",
+            rest.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
 
     match objective {
@@ -528,10 +606,15 @@ fn purpose_sentence_rich(
 /// Entry point detection based on path only (graph-root detection is done in build_fresh).
 fn is_entry_point_path(path: &str) -> bool {
     let p = path.to_lowercase();
-    p.contains("main") || p.contains("/app.") || p.ends_with("app.ts")
-        || p.ends_with("app.tsx") || p.ends_with("app.js")
-        || p.contains("index.") || p.contains("server.")
-        || p.contains("entrypoint") || p.contains("entry.")
+    p.contains("main")
+        || p.contains("/app.")
+        || p.ends_with("app.ts")
+        || p.ends_with("app.tsx")
+        || p.ends_with("app.js")
+        || p.contains("index.")
+        || p.contains("server.")
+        || p.contains("entrypoint")
+        || p.contains("entry.")
 }
 
 fn build_narrative(
@@ -597,7 +680,10 @@ fn build_markdown(
             for file in files {
                 let path = file.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let purpose = file.get("purpose").and_then(|v| v.as_str()).unwrap_or("");
-                let is_ep = file.get("is_entry_point").and_then(|v| v.as_bool()).unwrap_or(false);
+                let is_ep = file
+                    .get("is_entry_point")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let ep_marker = if is_ep { " ⬡" } else { "" };
                 let symbols = file
                     .get("top_symbols")

@@ -14,7 +14,10 @@ pub struct DependencyInsight {
 pub struct DependencyIntelligence;
 
 impl DependencyIntelligence {
-    pub fn analyze(storage: &storage::Storage, org_graph: &OrganizationGraph) -> Result<DependencyInsight> {
+    pub fn analyze(
+        storage: &storage::Storage,
+        org_graph: &OrganizationGraph,
+    ) -> Result<DependencyInsight> {
         let cross_repo_dependencies = org_graph
             .repositories
             .iter()
@@ -28,7 +31,10 @@ impl DependencyIntelligence {
 
         let mut dependents: HashMap<String, HashSet<String>> = HashMap::new();
         for (from, to) in &cross_repo_dependencies {
-            dependents.entry(to.clone()).or_default().insert(from.clone());
+            dependents
+                .entry(to.clone())
+                .or_default()
+                .insert(from.clone());
         }
         let mut shared_libraries = dependents
             .iter()

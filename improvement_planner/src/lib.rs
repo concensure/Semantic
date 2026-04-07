@@ -69,21 +69,26 @@ impl ImprovementPlanner {
 
         for issue in architecture_issues {
             let (improvement_type, expected_benefit) = match issue.issue_type {
-                ArchitectureIssueType::LayerViolation => {
-                    (ImprovementType::ExtractInterface, "Restore architectural boundaries")
-                }
-                ArchitectureIssueType::TightCoupling => {
-                    (ImprovementType::ExtractInterface, "Reduce coupling and improve evolution speed")
-                }
-                ArchitectureIssueType::MissingInterface => {
-                    (ImprovementType::ExtractInterface, "Improve abstraction and replaceability")
-                }
-                ArchitectureIssueType::CyclicModuleDependency => {
-                    (ImprovementType::SplitModule, "Break cycles and simplify dependency flow")
-                }
-                ArchitectureIssueType::GodModule => {
-                    (ImprovementType::SplitModule, "Reduce module size and ownership contention")
-                }
+                ArchitectureIssueType::LayerViolation => (
+                    ImprovementType::ExtractInterface,
+                    "Restore architectural boundaries",
+                ),
+                ArchitectureIssueType::TightCoupling => (
+                    ImprovementType::ExtractInterface,
+                    "Reduce coupling and improve evolution speed",
+                ),
+                ArchitectureIssueType::MissingInterface => (
+                    ImprovementType::ExtractInterface,
+                    "Improve abstraction and replaceability",
+                ),
+                ArchitectureIssueType::CyclicModuleDependency => (
+                    ImprovementType::SplitModule,
+                    "Break cycles and simplify dependency flow",
+                ),
+                ArchitectureIssueType::GodModule => (
+                    ImprovementType::SplitModule,
+                    "Reduce module size and ownership contention",
+                ),
             };
             plans.push(ImprovementPlan {
                 plan_id: format!("imp_arch_{}", sanitize_id(&issue.module)),
