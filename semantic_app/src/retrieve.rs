@@ -346,6 +346,7 @@ impl AppRuntime {
                         request_path_hint.as_deref(),
                     );
                     let readiness = index_readiness(indexed_files.len(), coverage);
+                    let auto_index_requested = body.auto_index_target.unwrap_or(false);
                     if body.auto_index_target.unwrap_or(false) && coverage == "unindexed_target" {
                         if let Some(target) = target.as_deref() {
                             self.indexer()
@@ -383,12 +384,41 @@ impl AppRuntime {
                                         "index_readiness".to_string(),
                                         serde_json::json!(index_readiness(indexed_files.len(), "indexed_target")),
                                     );
+                                    obj.insert(
+                                        "index_recovery_mode".to_string(),
+                                        serde_json::json!("auto_index_applied"),
+                                    );
+                                    if let Some(result) =
+                                        obj.get_mut("result").and_then(|v| v.as_object_mut())
+                                    {
+                                        result.insert(
+                                            "index_recovery_mode".to_string(),
+                                            serde_json::json!("auto_index_applied"),
+                                        );
+                                    }
+                                }
+                            } else if let Some(obj) = retried.as_object_mut() {
+                                obj.insert(
+                                    "index_recovery_mode".to_string(),
+                                    serde_json::json!("auto_index_attempted_no_change"),
+                                );
+                                if let Some(result) =
+                                    obj.get_mut("result").and_then(|v| v.as_object_mut())
+                                {
+                                    result.insert(
+                                        "index_recovery_mode".to_string(),
+                                        serde_json::json!("auto_index_attempted_no_change"),
+                                    );
                                 }
                             }
                             return Ok(retried);
                         }
                     }
                     obj.insert("index_readiness".to_string(), serde_json::json!(readiness));
+                    obj.insert(
+                        "index_recovery_mode".to_string(),
+                        serde_json::json!(index_recovery_mode(auto_index_requested, coverage)),
+                    );
                     obj.insert("index_coverage".to_string(), serde_json::json!(coverage));
                     if let Some(target) = target {
                         obj.insert("index_coverage_target".to_string(), serde_json::json!(target));
@@ -500,11 +530,21 @@ fn index_readiness(indexed_file_count: usize, coverage: &str) -> &'static str {
     }
 }
 
+fn index_recovery_mode(auto_index_requested: bool, coverage: &str) -> &'static str {
+    if auto_index_requested && coverage == "unindexed_target" {
+        "auto_index_attempted_no_change"
+    } else if coverage == "unindexed_target" {
+        "suggest_only"
+    } else {
+        "none"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_index_coverage, index_readiness, retrieve_coverage_resolved,
-        suggested_index_command,
+        compute_index_coverage, index_readiness, index_recovery_mode,
+        retrieve_coverage_resolved, suggested_index_command,
     };
     use crate::{runtime::AppRuntime, RuntimeOptions};
     use engine::{Operation, RetrievalRequest};
@@ -556,6 +596,7 @@ mod tests {
         let resolved = serde_json::json!({
             "result": {
                 "index_readiness": "target_ready",
+                "index_recovery_mode": "none",
                 "index_coverage": "indexed_target",
                 "index_coverage_target": "src/worker"
             }
@@ -573,6 +614,16 @@ mod tests {
             "partial_index_missing_target"
         );
         assert_eq!(index_readiness(1, "indexed_repo"), "indexed_repo");
+    }
+
+    #[test]
+    fn index_recovery_mode_distinguishes_suggest_and_attempted() {
+        assert_eq!(index_recovery_mode(false, "indexed_target"), "none");
+        assert_eq!(index_recovery_mode(false, "unindexed_target"), "suggest_only");
+        assert_eq!(
+            index_recovery_mode(true, "unindexed_target"),
+            "auto_index_attempted_no_change"
+        );
     }
 
     #[test]
@@ -651,12 +702,20 @@ mod tests {
             Some("target_ready")
         );
         assert_eq!(
+            result.get("index_recovery_mode").and_then(|v| v.as_str()),
+            Some("auto_index_applied")
+        );
+        assert_eq!(
             result.get("index_coverage").and_then(|v| v.as_str()),
             Some("indexed_target")
         );
         assert_eq!(
             result.get("index_readiness").and_then(|v| v.as_str()),
             Some("target_ready")
+        );
+        assert_eq!(
+            result.get("index_recovery_mode").and_then(|v| v.as_str()),
+            Some("auto_index_applied")
         );
         assert_eq!(
             result.get("index_coverage_target").and_then(|v| v.as_str()),

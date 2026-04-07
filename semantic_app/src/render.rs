@@ -1190,6 +1190,12 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                 {
                     out.push_str(&format!("\nindex_readiness: {index_readiness}"));
                 }
+                if let Some(index_recovery_mode) = verification
+                    .get("index_recovery_mode")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!("\nindex_recovery_mode: {index_recovery_mode}"));
+                }
                 if let Some(command) = verification
                     .get("suggested_index_command")
                     .and_then(|v| v.as_str())
@@ -1480,6 +1486,12 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .and_then(|v| v.as_str())
                 {
                     out.push_str(&format!("\nindex_readiness: {index_readiness}"));
+                }
+                if let Some(index_recovery_mode) = result
+                    .get("index_recovery_mode")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!("\nindex_recovery_mode: {index_recovery_mode}"));
                 }
                 if let Some(command) = result
                     .get("suggested_index_command")
@@ -2271,6 +2283,7 @@ mod tests {
                 "recommended_action": "safe to proceed with semantic context",
                 "mutation_state": "ready",
                 "index_readiness": "target_ready",
+                "index_recovery_mode": "none",
                 "index_coverage": "indexed_target",
                 "index_coverage_target": "src/config/loadConfig.ts",
                 "mutation_bundle": {
@@ -2296,6 +2309,7 @@ mod tests {
         assert!(rendered.contains("mutation_safety: ready"));
         assert!(rendered.contains("mutation_bundle: exact_ready"));
         assert!(rendered.contains("index_readiness: target_ready"));
+        assert!(rendered.contains("index_recovery_mode: none"));
         assert!(rendered.contains("index_coverage: indexed_target @ src/config/loadConfig.ts"));
         assert!(!rendered.contains("verification_issue:"));
         assert!(!rendered.contains("verification_follow_up:"));
@@ -2309,6 +2323,7 @@ mod tests {
             "verification": {
                 "status": "needs_review",
                 "index_readiness": "partial_index_missing_target",
+                "index_recovery_mode": "suggest_only",
                 "recommended_action": "review returned spans",
                 "index_coverage": "unindexed_target",
                 "index_coverage_target": "src/worker",
@@ -2319,6 +2334,7 @@ mod tests {
         });
         let rendered = text_output(&value, false);
         assert!(rendered.contains("index_readiness: partial_index_missing_target"));
+        assert!(rendered.contains("index_recovery_mode: suggest_only"));
         assert!(rendered.contains("index_coverage: unindexed_target @ src/worker"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
         assert!(rendered.contains("verification_issue: target_path_not_indexed"));
@@ -2331,6 +2347,7 @@ mod tests {
             "operation": "get_directory_brief",
             "result": {
                 "index_readiness": "partial_index_missing_target",
+                "index_recovery_mode": "suggest_only",
                 "summary_text": "src/worker: 4 files",
                 "index_coverage": "unindexed_target",
                 "index_coverage_target": "src/worker",
@@ -2339,6 +2356,7 @@ mod tests {
         });
         let rendered = text_output(&value, false);
         assert!(rendered.contains("index_readiness: partial_index_missing_target"));
+        assert!(rendered.contains("index_recovery_mode: suggest_only"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
     }
 
@@ -2351,7 +2369,8 @@ mod tests {
             "indexed_file_count": 2,
             "indexed_path_hints": ["src/auth", "src/worker"],
             "verification": {
-                "status": "low_confidence"
+                "status": "low_confidence",
+                "index_recovery_mode": "auto_index_applied"
             },
             "result": {
                 "symbol": "runJob"
@@ -2361,6 +2380,7 @@ mod tests {
         assert!(rendered.contains("auto_index: applied @ src/worker/job.ts"));
         assert!(rendered.contains("indexed_file_count: 2"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
+        assert!(rendered.contains("index_recovery_mode: auto_index_applied"));
     }
 
     #[test]
@@ -2373,6 +2393,7 @@ mod tests {
             "indexed_file_count": 2,
             "indexed_path_hints": ["src/auth", "src/worker"],
             "result": {
+                "index_recovery_mode": "auto_index_applied",
                 "index_coverage": "indexed_target",
                 "index_coverage_target": "src/worker/job.ts"
             }
@@ -2381,6 +2402,7 @@ mod tests {
         assert!(rendered.contains("auto_index: applied @ src/worker/job.ts"));
         assert!(rendered.contains("indexed_file_count: 2"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
+        assert!(rendered.contains("index_recovery_mode: auto_index_applied"));
     }
 
     #[test]

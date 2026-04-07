@@ -283,6 +283,7 @@ impl AppRuntime {
             route_path_hint.as_deref(),
         );
         let route_index_readiness = index_readiness(indexed_files.len(), index_coverage);
+        let auto_index_requested = body.auto_index_target.unwrap_or(false);
         if body.auto_index_target.unwrap_or(false) && index_coverage == "unindexed_target" {
             if let Some(target) = index_coverage_target.as_deref() {
                 if self
@@ -309,6 +310,44 @@ impl AppRuntime {
                                 json!(summarize_indexed_path_hints(&indexed_files)),
                             );
                             obj.insert("index_readiness".to_string(), json!("target_ready"));
+                            obj.insert("index_recovery_mode".to_string(), json!("auto_index_applied"));
+                            if let Some(verification) =
+                                obj.get_mut("verification").and_then(|v| v.as_object_mut())
+                            {
+                                verification.insert(
+                                    "index_recovery_mode".to_string(),
+                                    json!("auto_index_applied"),
+                                );
+                            }
+                            if let Some(result) =
+                                obj.get_mut("result").and_then(|v| v.as_object_mut())
+                            {
+                                result.insert(
+                                    "index_recovery_mode".to_string(),
+                                    json!("auto_index_applied"),
+                                );
+                            }
+                        }
+                    } else if let Some(obj) = retried.as_object_mut() {
+                        obj.insert(
+                            "index_recovery_mode".to_string(),
+                            json!("auto_index_attempted_no_change"),
+                        );
+                        if let Some(verification) =
+                            obj.get_mut("verification").and_then(|v| v.as_object_mut())
+                        {
+                            verification.insert(
+                                "index_recovery_mode".to_string(),
+                                json!("auto_index_attempted_no_change"),
+                            );
+                        }
+                        if let Some(result) =
+                            obj.get_mut("result").and_then(|v| v.as_object_mut())
+                        {
+                            result.insert(
+                                "index_recovery_mode".to_string(),
+                                json!("auto_index_attempted_no_change"),
+                            );
                         }
                     }
                     return retried;
@@ -439,6 +478,10 @@ impl AppRuntime {
         }
         if let Some(obj) = verification.as_object_mut() {
             obj.insert("index_readiness".to_string(), json!(route_index_readiness));
+            obj.insert(
+                "index_recovery_mode".to_string(),
+                json!(index_recovery_mode(auto_index_requested, index_coverage)),
+            );
             obj.insert("index_coverage".to_string(), json!(index_coverage));
             if let Some(target) = index_coverage_target.clone() {
                 obj.insert("index_coverage_target".to_string(), json!(target));
@@ -513,6 +556,10 @@ impl AppRuntime {
                 )),
             );
             obj.insert("index_readiness".to_string(), json!(route_index_readiness));
+            obj.insert(
+                "index_recovery_mode".to_string(),
+                json!(index_recovery_mode(auto_index_requested, index_coverage)),
+            );
             obj.insert("index_coverage".to_string(), json!(index_coverage));
             if let Some(target) = index_coverage_target.clone() {
                 obj.insert("index_coverage_target".to_string(), json!(target));
@@ -1382,6 +1429,16 @@ fn index_readiness(indexed_file_count: usize, coverage: &str) -> &'static str {
         "partial_index_missing_target"
     } else {
         "indexed_repo"
+    }
+}
+
+fn index_recovery_mode(auto_index_requested: bool, coverage: &str) -> &'static str {
+    if auto_index_requested && coverage == "unindexed_target" {
+        "auto_index_attempted_no_change"
+    } else if coverage == "unindexed_target" {
+        "suggest_only"
+    } else {
+        "none"
     }
 }
 
@@ -3053,6 +3110,12 @@ mod tests {
         );
         assert_eq!(
             verification
+                .get("index_recovery_mode")
+                .and_then(|v| v.as_str()),
+            Some("suggest_only")
+        );
+        assert_eq!(
+            verification
                 .get("index_coverage")
                 .and_then(|v| v.as_str()),
             Some("unindexed_target")
@@ -3136,6 +3199,10 @@ mod tests {
             Some("src/worker")
         );
         assert_eq!(
+            value.get("index_recovery_mode").and_then(|v| v.as_str()),
+            Some("auto_index_applied")
+        );
+        assert_eq!(
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
         );
@@ -3151,6 +3218,12 @@ mod tests {
                 .get("index_readiness")
                 .and_then(|v| v.as_str()),
             Some("target_ready")
+        );
+        assert_eq!(
+            verification
+                .get("index_recovery_mode")
+                .and_then(|v| v.as_str()),
+            Some("auto_index_attempted_no_change")
         );
         assert_eq!(
             verification
@@ -3227,6 +3300,10 @@ mod tests {
             Some("src/worker/job.ts")
         );
         assert_eq!(
+            value.get("index_recovery_mode").and_then(|v| v.as_str()),
+            Some("auto_index_applied")
+        );
+        assert_eq!(
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
         );
@@ -3236,6 +3313,12 @@ mod tests {
                 .get("index_readiness")
                 .and_then(|v| v.as_str()),
             Some("target_ready")
+        );
+        assert_eq!(
+            verification
+                .get("index_recovery_mode")
+                .and_then(|v| v.as_str()),
+            Some("auto_index_attempted_no_change")
         );
         assert_eq!(
             verification
@@ -3296,12 +3379,22 @@ mod tests {
         });
 
         assert_eq!(value.get("auto_index_applied"), None);
+        assert_eq!(
+            value.get("index_recovery_mode").and_then(|v| v.as_str()),
+            Some("auto_index_attempted_no_change")
+        );
         let verification = value.get("verification").expect("verification");
         assert_eq!(
             verification
                 .get("index_readiness")
                 .and_then(|v| v.as_str()),
             Some("partial_index_missing_target")
+        );
+        assert_eq!(
+            verification
+                .get("index_recovery_mode")
+                .and_then(|v| v.as_str()),
+            Some("auto_index_attempted_no_change")
         );
         assert_eq!(
             verification
