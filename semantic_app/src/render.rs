@@ -1026,6 +1026,19 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .collect()
             })
             .unwrap_or_default();
+        let index_region_status = value
+            .get("index_region_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let indexed_region_hints: Vec<String> = value
+            .get("indexed_region_hints")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let watcher_running = value
             .get("watcher_running")
             .and_then(|v| v.as_bool())
@@ -1064,12 +1077,18 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
             .unwrap_or_default();
 
         let mut out = format!(
-            "status: ok\nrepo_root: {repo_root}\nindex_revision: {index_revision}\nindex_available: {index_available}\nindexed_file_count: {indexed_file_count}\nwatcher_running: {watcher_running}\nbootstrap_index_action: {bootstrap_index_action}\nindexing_mode: {indexing_mode}\nindexing_completeness: {indexing_completeness}\nworkspace_mode_enabled: {workspace_mode_enabled}\nllm_router_configured: {llm_router_configured}\nperformance: symbol_lookup_avg={symbol_avg_ms:.1}ms planned_context_p95={planned_p95_ms:.1}ms"
+            "status: ok\nrepo_root: {repo_root}\nindex_revision: {index_revision}\nindex_available: {index_available}\nindexed_file_count: {indexed_file_count}\nindex_region_status: {index_region_status}\nwatcher_running: {watcher_running}\nbootstrap_index_action: {bootstrap_index_action}\nindexing_mode: {indexing_mode}\nindexing_completeness: {indexing_completeness}\nworkspace_mode_enabled: {workspace_mode_enabled}\nllm_router_configured: {llm_router_configured}\nperformance: symbol_lookup_avg={symbol_avg_ms:.1}ms planned_context_p95={planned_p95_ms:.1}ms"
         );
         if !indexed_path_hints.is_empty() {
             out.push_str(&format!(
                 "\nindexed_path_hints: {}",
                 indexed_path_hints.join(" | ")
+            ));
+        }
+        if !indexed_region_hints.is_empty() {
+            out.push_str(&format!(
+                "\nindexed_region_hints: {}",
+                indexed_region_hints.join(" | ")
             ));
         }
         if verbose {
@@ -1192,6 +1211,12 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .and_then(|v| v.as_str())
                 {
                     out.push_str(&format!("\nindex_readiness: {index_readiness}"));
+                }
+                if let Some(index_region_status) = verification
+                    .get("index_region_status")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!("\nindex_region_status: {index_region_status}"));
                 }
                 if let Some(index_recovery_mode) = verification
                     .get("index_recovery_mode")
@@ -1502,6 +1527,12 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .and_then(|v| v.as_str())
                 {
                     out.push_str(&format!("\nindex_readiness: {index_readiness}"));
+                }
+                if let Some(index_region_status) = result
+                    .get("index_region_status")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!("\nindex_region_status: {index_region_status}"));
                 }
                 if let Some(index_recovery_mode) = result
                     .get("index_recovery_mode")
@@ -1815,7 +1846,9 @@ mod tests {
             "index_revision": 42,
             "index_available": true,
             "indexed_file_count": 128,
+            "index_region_status": "fully_indexed",
             "indexed_path_hints": ["src/auth", "src/shared"],
+            "indexed_region_hints": ["."],
             "watcher_running": false,
             "bootstrap_index_action": "reuse_existing",
             "indexing_mode": "full_with_default_excludes",
@@ -1834,7 +1867,9 @@ mod tests {
         assert!(rendered.contains("index_revision: 42"));
         assert!(rendered.contains("index_available: true"));
         assert!(rendered.contains("indexed_file_count: 128"));
+        assert!(rendered.contains("index_region_status: fully_indexed"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/shared"));
+        assert!(rendered.contains("indexed_region_hints: ."));
         assert!(rendered.contains("bootstrap_index_action: reuse_existing"));
         assert!(rendered.contains("indexing_mode: full_with_default_excludes"));
         assert!(rendered.contains("indexing_completeness: source_focused"));
@@ -1849,7 +1884,9 @@ mod tests {
             "index_revision": 7,
             "index_available": true,
             "indexed_file_count": 2,
+            "index_region_status": "targeted_partial",
             "indexed_path_hints": ["packages/api/src", "packages/worker/src"],
+            "indexed_region_hints": ["packages/api/src"],
             "watcher_running": true,
             "bootstrap_index_action": "bootstrap_full",
             "indexing_mode": "full_with_default_excludes",
@@ -1867,6 +1904,8 @@ mod tests {
         });
         let rendered = text_output(&value, true);
         assert!(rendered.contains("workspace_roots: C:/repo/packages/api | C:/repo/packages/worker"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
+        assert!(rendered.contains("indexed_region_hints: packages/api/src"));
     }
 
     #[test]
@@ -2370,6 +2409,7 @@ mod tests {
             "selected_tool": "get_directory_brief",
             "verification": {
                 "status": "needs_review",
+                "index_region_status": "targeted_partial",
                 "index_readiness": "partial_index_missing_target",
                 "index_recovery_mode": "suggest_only",
                 "index_recovery_target_kind": "directory",
@@ -2383,6 +2423,7 @@ mod tests {
         });
         let rendered = text_output(&value, false);
         assert!(rendered.contains("index_readiness: partial_index_missing_target"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("index_recovery_mode: suggest_only"));
         assert!(rendered.contains("index_recovery_target_kind: directory"));
         assert!(rendered.contains("index_coverage: unindexed_target @ src/worker"));
@@ -2396,6 +2437,7 @@ mod tests {
             "ok": true,
             "operation": "get_directory_brief",
             "result": {
+                "index_region_status": "targeted_partial",
                 "index_readiness": "partial_index_missing_target",
                 "index_recovery_mode": "suggest_only",
                 "index_recovery_target_kind": "directory",
@@ -2407,6 +2449,7 @@ mod tests {
         });
         let rendered = text_output(&value, false);
         assert!(rendered.contains("index_readiness: partial_index_missing_target"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("index_recovery_mode: suggest_only"));
         assert!(rendered.contains("index_recovery_target_kind: directory"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
@@ -2426,6 +2469,7 @@ mod tests {
             },
             "verification": {
                 "status": "low_confidence",
+                "index_region_status": "targeted_partial",
                 "index_recovery_mode": "auto_index_applied",
                 "index_recovery_target_kind": "file"
             },
@@ -2438,6 +2482,7 @@ mod tests {
         assert!(rendered.contains("indexed_file_count: 2"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
         assert!(rendered.contains("index_recovery_delta: +1 file(s): src/worker/job.ts"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("index_recovery_mode: auto_index_applied"));
         assert!(rendered.contains("index_recovery_target_kind: file"));
     }
@@ -2456,6 +2501,7 @@ mod tests {
                 "changed_files": ["src/worker/job.ts"]
             },
             "result": {
+                "index_region_status": "targeted_partial",
                 "index_recovery_mode": "auto_index_applied",
                 "index_recovery_target_kind": "file",
                 "index_coverage": "indexed_target",
@@ -2467,6 +2513,7 @@ mod tests {
         assert!(rendered.contains("indexed_file_count: 2"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
         assert!(rendered.contains("index_recovery_delta: +1 file(s): src/worker/job.ts"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("index_recovery_mode: auto_index_applied"));
         assert!(rendered.contains("index_recovery_target_kind: file"));
     }

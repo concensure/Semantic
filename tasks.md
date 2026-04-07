@@ -114,8 +114,11 @@ Current implementation status:
     - `semantic index --path <dir-or-file>`
   - surfaced indexed coverage hints via:
     - `indexed_path_hints`
+    - `index_region_status`
+    - `indexed_region_hints`
     - explicit partial-index coverage signaling in retrieve/route outputs via:
       - `index_readiness`
+      - `index_region_status`
       - `index_recovery_mode`
       - `index_recovery_target_kind`
       - `index_recovery_delta`

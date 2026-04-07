@@ -1,5 +1,8 @@
 use crate::models::RetrieveRequestBody;
-use crate::runtime::{summarize_index_recovery_delta, summarize_indexed_path_hints};
+use crate::runtime::{
+    index_region_status, load_index_coverage_manifest, summarize_index_recovery_delta,
+    summarize_indexed_path_hints,
+};
 use crate::runtime::AppRuntime;
 use crate::session::{
     apply_session_context_reuse, apply_session_raw_expansion_controls, touch_or_create_session,
@@ -340,6 +343,7 @@ impl AppRuntime {
                         .lock()
                         .with_storage(|storage| storage.list_files())
                         .unwrap_or_default();
+                    let index_manifest = load_index_coverage_manifest(self.repo_root());
                     let (coverage, target) = compute_index_coverage(
                         &indexed_files,
                         request_file_hint.as_deref(),
@@ -391,6 +395,13 @@ impl AppRuntime {
                                         )),
                                     );
                                     obj.insert(
+                                        "index_region_status".to_string(),
+                                        serde_json::json!(index_region_status(
+                                            !indexed_files.is_empty(),
+                                            index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+                                        )),
+                                    );
+                                    obj.insert(
                                         "index_recovery_delta".to_string(),
                                         serde_json::json!({
                                             "added_file_count": added_file_count,
@@ -415,6 +426,15 @@ impl AppRuntime {
                                         result.insert(
                                             "index_recovery_target_kind".to_string(),
                                             serde_json::json!(index_recovery_target_kind(target)),
+                                        );
+                                        result.insert(
+                                            "index_region_status".to_string(),
+                                            serde_json::json!(index_region_status(
+                                                !indexed_files.is_empty(),
+                                                index_manifest
+                                                    .as_ref()
+                                                    .map(|m| m.coverage_mode.as_str()),
+                                            )),
                                         );
                                         result.insert(
                                             "index_recovery_delta".to_string(),
@@ -451,6 +471,13 @@ impl AppRuntime {
                         }
                     }
                     obj.insert("index_readiness".to_string(), serde_json::json!(readiness));
+                    obj.insert(
+                        "index_region_status".to_string(),
+                        serde_json::json!(index_region_status(
+                            !indexed_files.is_empty(),
+                            index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+                        )),
+                    );
                     obj.insert(
                         "index_recovery_mode".to_string(),
                         serde_json::json!(index_recovery_mode(auto_index_requested, coverage)),
@@ -749,6 +776,10 @@ mod tests {
             Some("file")
         );
         assert_eq!(
+            value.get("index_region_status").and_then(|v| v.as_str()),
+            Some("targeted_partial")
+        );
+        assert_eq!(
             value.get("index_recovery_delta")
                 .and_then(|v| v.get("added_file_count"))
                 .and_then(|v| v.as_u64()),
@@ -782,6 +813,10 @@ mod tests {
                 .get("index_recovery_target_kind")
                 .and_then(|v| v.as_str()),
             Some("file")
+        );
+        assert_eq!(
+            result.get("index_region_status").and_then(|v| v.as_str()),
+            Some("targeted_partial")
         );
         assert_eq!(
             result

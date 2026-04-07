@@ -7,6 +7,7 @@ use knowledge_graph::KnowledgeGraph;
 use llm_router::LLMRouter;
 use parking_lot::Mutex;
 use retrieval::RetrievalService;
+use serde::Deserialize;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -208,6 +209,7 @@ impl AppRuntime {
         let retrieval = self.inner.retrieval.lock();
         let workspace = self.inner.workspace_state.lock();
         let indexed_file_count = retrieval.indexed_file_count();
+        let index_manifest = load_index_coverage_manifest(&self.inner.repo_root);
         let indexed_path_hints = retrieval
             .with_storage(|storage| storage.list_files())
             .map(|files| summarize_indexed_path_hints(&files))
@@ -222,6 +224,14 @@ impl AppRuntime {
             "index_available": index_available,
             "indexed_file_count": indexed_file_count,
             "indexed_path_hints": indexed_path_hints,
+            "index_region_status": index_region_status(
+                index_available,
+                index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+            ),
+            "indexed_region_hints": index_manifest
+                .as_ref()
+                .map(|m| m.targeted_paths.clone())
+                .unwrap_or_default(),
             "watcher_running": self.watcher_running(),
             "bootstrap_index_action": self.inner.bootstrap_index_action,
             "indexing_mode": indexing_mode,
@@ -293,10 +303,40 @@ pub(crate) fn summarize_index_recovery_delta(
     (added_file_count, changed_files)
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct IndexCoverageManifest {
+    #[serde(default)]
+    pub coverage_mode: String,
+    #[serde(default)]
+    pub targeted_paths: Vec<String>,
+}
+
+pub(crate) fn load_index_coverage_manifest(repo_root: &Path) -> Option<IndexCoverageManifest> {
+    let path = repo_root.join(".semantic").join("index_manifest.json");
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub(crate) fn index_region_status(
+    index_available: bool,
+    coverage_mode: Option<&str>,
+) -> &'static str {
+    if !index_available {
+        "unindexed"
+    } else {
+        match coverage_mode {
+            Some("full") => "fully_indexed",
+            Some("targeted") => "targeted_partial",
+            _ => "indexed_unknown_scope",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        summarize_index_recovery_delta, AppRuntime, BootstrapIndexPolicy, RuntimeOptions,
+        index_region_status, summarize_index_recovery_delta, AppRuntime, BootstrapIndexPolicy,
+        RuntimeOptions,
     };
     use std::fs;
 
@@ -323,6 +363,10 @@ mod tests {
                 .get("bootstrap_index_action")
                 .and_then(|v| v.as_str()),
             Some("bootstrap_full")
+        );
+        assert_eq!(
+            status.get("index_region_status").and_then(|v| v.as_str()),
+            Some("fully_indexed")
         );
         assert_eq!(status.get("index_available").and_then(|v| v.as_bool()), Some(true));
     }
@@ -371,6 +415,13 @@ mod tests {
         assert_eq!(
             second
                 .status_json()
+                .get("index_region_status")
+                .and_then(|v| v.as_str()),
+            Some("fully_indexed")
+        );
+        assert_eq!(
+            second
+                .status_json()
                 .get("indexed_path_hints")
                 .and_then(|v| v.as_array())
                 .map(|items| items.iter().filter_map(|item| item.as_str()).collect::<Vec<_>>()),
@@ -404,6 +455,10 @@ mod tests {
         );
         assert_eq!(status.get("index_available").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(status.get("indexed_file_count").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            status.get("index_region_status").and_then(|v| v.as_str()),
+            Some("unindexed")
+        );
     }
 
     #[test]
@@ -423,6 +478,57 @@ mod tests {
                 "src/worker/job.ts".to_string(),
                 "src/worker/queue.ts".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn index_region_status_distinguishes_full_targeted_and_unindexed() {
+        assert_eq!(index_region_status(false, Some("full")), "unindexed");
+        assert_eq!(index_region_status(true, Some("full")), "fully_indexed");
+        assert_eq!(
+            index_region_status(true, Some("targeted")),
+            "targeted_partial"
+        );
+        assert_eq!(index_region_status(true, None), "indexed_unknown_scope");
+    }
+
+    #[test]
+    fn targeted_indexing_sets_targeted_partial_region_status() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("src").join("auth")).expect("mkdir auth");
+        fs::write(
+            repo.join("src").join("auth").join("session.ts"),
+            "export function buildSession(){ return 1; }\n",
+        )
+        .expect("write source");
+
+        let runtime = AppRuntime::bootstrap(
+            repo.clone(),
+            RuntimeOptions {
+                start_watcher: false,
+                ensure_config: true,
+                bootstrap_index_policy: BootstrapIndexPolicy::Skip,
+            },
+        )
+        .expect("bootstrap runtime");
+        runtime
+            .indexer()
+            .lock()
+            .index_paths(runtime.repo_root(), &[String::from("src/auth")])
+            .expect("targeted index");
+
+        let status = runtime.status_json();
+        assert_eq!(
+            status.get("index_region_status").and_then(|v| v.as_str()),
+            Some("targeted_partial")
+        );
+        assert!(
+            status
+                .get("indexed_region_hints")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().any(|item| item.as_str() == Some("src/auth")))
+                .unwrap_or(false)
         );
     }
 }

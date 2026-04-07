@@ -1,5 +1,8 @@
 use crate::models::IdeAutoRouteRequest;
-use crate::runtime::{summarize_index_recovery_delta, summarize_indexed_path_hints};
+use crate::runtime::{
+    index_region_status, load_index_coverage_manifest, summarize_index_recovery_delta,
+    summarize_indexed_path_hints,
+};
 use crate::runtime::AppRuntime;
 use crate::session::{
     apply_session_context_reuse, apply_session_raw_expansion_controls, auto_session_id,
@@ -276,6 +279,7 @@ impl AppRuntime {
             .lock()
             .with_storage(|storage| storage.list_files())
             .unwrap_or_default();
+        let index_manifest = load_index_coverage_manifest(self.repo_root());
         let route_path_hint = extract_path_hint(&task);
         let (index_coverage, index_coverage_target) = compute_route_index_coverage(
             &indexed_files,
@@ -317,6 +321,13 @@ impl AppRuntime {
                                 json!(summarize_indexed_path_hints(&indexed_files)),
                             );
                             obj.insert(
+                                "index_region_status".to_string(),
+                                json!(index_region_status(
+                                    !indexed_files.is_empty(),
+                                    index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+                                )),
+                            );
+                            obj.insert(
                                 "index_recovery_delta".to_string(),
                                 json!({
                                     "added_file_count": added_file_count,
@@ -337,6 +348,15 @@ impl AppRuntime {
                                     json!(index_recovery_target_kind(target)),
                                 );
                                 verification.insert(
+                                    "index_region_status".to_string(),
+                                    json!(index_region_status(
+                                        !indexed_files.is_empty(),
+                                        index_manifest
+                                            .as_ref()
+                                            .map(|m| m.coverage_mode.as_str()),
+                                    )),
+                                );
+                                verification.insert(
                                     "index_recovery_delta".to_string(),
                                     json!({
                                         "added_file_count": added_file_count,
@@ -354,6 +374,15 @@ impl AppRuntime {
                                 result.insert(
                                     "index_recovery_target_kind".to_string(),
                                     json!(index_recovery_target_kind(target)),
+                                );
+                                result.insert(
+                                    "index_region_status".to_string(),
+                                    json!(index_region_status(
+                                        !indexed_files.is_empty(),
+                                        index_manifest
+                                            .as_ref()
+                                            .map(|m| m.coverage_mode.as_str()),
+                                    )),
                                 );
                                 result.insert(
                                     "index_recovery_delta".to_string(),
@@ -527,6 +556,13 @@ impl AppRuntime {
         if let Some(obj) = verification.as_object_mut() {
             obj.insert("index_readiness".to_string(), json!(route_index_readiness));
             obj.insert(
+                "index_region_status".to_string(),
+                json!(index_region_status(
+                    !indexed_files.is_empty(),
+                    index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+                )),
+            );
+            obj.insert(
                 "index_recovery_mode".to_string(),
                 json!(index_recovery_mode(auto_index_requested, index_coverage)),
             );
@@ -609,6 +645,13 @@ impl AppRuntime {
             );
             obj.insert("index_readiness".to_string(), json!(route_index_readiness));
             obj.insert(
+                "index_region_status".to_string(),
+                json!(index_region_status(
+                    !indexed_files.is_empty(),
+                    index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+                )),
+            );
+            obj.insert(
                 "index_recovery_mode".to_string(),
                 json!(index_recovery_mode(auto_index_requested, index_coverage)),
             );
@@ -641,6 +684,10 @@ impl AppRuntime {
             "already_opened_refs": raw_outcome.already_opened_hits,
             "raw_expansion_mode": raw_expansion_mode.label(),
             "raw_budget_exhausted": raw_outcome.budget_exhausted,
+            "index_region_status": index_region_status(
+                !indexed_files.is_empty(),
+                index_manifest.as_ref().map(|m| m.coverage_mode.as_str()),
+            ),
             "refs_unchanged": refs_unchanged,
             "context_delta": context_delta_value,
             "context_delta_mode": context_delta_mode,
@@ -3174,6 +3221,12 @@ mod tests {
         );
         assert_eq!(
             verification
+                .get("index_region_status")
+                .and_then(|v| v.as_str()),
+            Some("targeted_partial")
+        );
+        assert_eq!(
+            verification
                 .get("index_recovery_mode")
                 .and_then(|v| v.as_str()),
             Some("suggest_only")
@@ -3277,6 +3330,10 @@ mod tests {
             Some("directory")
         );
         assert_eq!(
+            value.get("index_region_status").and_then(|v| v.as_str()),
+            Some("targeted_partial")
+        );
+        assert_eq!(
             value.get("index_recovery_delta")
                 .and_then(|v| v.get("added_file_count"))
                 .and_then(|v| v.as_u64()),
@@ -3312,6 +3369,12 @@ mod tests {
                 .get("index_recovery_mode")
                 .and_then(|v| v.as_str()),
             Some("auto_index_applied")
+        );
+        assert_eq!(
+            verification
+                .get("index_region_status")
+                .and_then(|v| v.as_str()),
+            Some("targeted_partial")
         );
         assert_eq!(
             verification
@@ -3399,6 +3462,10 @@ mod tests {
             Some("auto_index_applied")
         );
         assert_eq!(
+            value.get("index_region_status").and_then(|v| v.as_str()),
+            Some("targeted_partial")
+        );
+        assert_eq!(
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
         );
@@ -3414,6 +3481,12 @@ mod tests {
                 .get("index_readiness")
                 .and_then(|v| v.as_str()),
             Some("target_ready")
+        );
+        assert_eq!(
+            verification
+                .get("index_region_status")
+                .and_then(|v| v.as_str()),
+            Some("targeted_partial")
         );
         assert_eq!(
             verification
@@ -3494,6 +3567,12 @@ mod tests {
                 .get("index_readiness")
                 .and_then(|v| v.as_str()),
             Some("partial_index_missing_target")
+        );
+        assert_eq!(
+            verification
+                .get("index_region_status")
+                .and_then(|v| v.as_str()),
+            Some("targeted_partial")
         );
         assert_eq!(
             verification

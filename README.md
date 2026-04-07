@@ -92,6 +92,8 @@ cargo run -p semantic_cli -- --repo ./test_repo/todo_app route --task "add due d
 - `indexing_completeness`
 - `bootstrap_index_action`
 - `indexed_path_hints`
+- `index_region_status`
+- `indexed_region_hints`
 
 Current values are:
 
@@ -99,6 +101,8 @@ Current values are:
 - `indexing_completeness: source_focused`
 - `bootstrap_index_action: reuse_existing|bootstrap_full|skip_bootstrap_refresh`
 - `indexed_path_hints: ...` for the currently indexed directories/files
+- `index_region_status: unindexed|fully_indexed|targeted_partial|indexed_unknown_scope`
+- `indexed_region_hints: ...` for the explicitly targeted regions when partial indexing is in use
 
 When no index exists yet, shallow navigation is still available through:
 
@@ -125,6 +129,7 @@ indexed_path_hints: src/auth | packages/api/src
 Retrieve and route flows now also surface coverage boundaries directly:
 
 - `index_readiness`
+- `index_region_status`
 - `index_recovery_mode`
 - `index_recovery_target_kind`
 - `index_recovery_delta`

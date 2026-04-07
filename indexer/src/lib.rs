@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use walkdir::WalkDir;
 
@@ -35,6 +35,30 @@ struct IndexerPerfStats {
     last_repo_ms: u128,
     last_update_ms: u128,
     last_repo_file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexCoverageManifest {
+    #[serde(default = "default_manifest_version")]
+    version: u8,
+    #[serde(default)]
+    coverage_mode: String,
+    #[serde(default)]
+    targeted_paths: Vec<String>,
+}
+
+fn default_manifest_version() -> u8 {
+    1
+}
+
+impl Default for IndexCoverageManifest {
+    fn default() -> Self {
+        Self {
+            version: default_manifest_version(),
+            coverage_mode: "targeted".to_string(),
+            targeted_paths: Vec::new(),
+        }
+    }
 }
 
 impl Indexer {
@@ -178,6 +202,14 @@ impl Indexer {
         self.perf_stats.last_repo_file_count = seen.len();
         self.record_repo_elapsed(started.elapsed().as_millis());
         self.persist_perf_stats(repo_path)?;
+        write_index_coverage_manifest(
+            repo_path,
+            IndexCoverageManifest {
+                version: default_manifest_version(),
+                coverage_mode: "full".to_string(),
+                targeted_paths: vec![".".to_string()],
+            },
+        )?;
         Ok(())
     }
 
@@ -222,6 +254,14 @@ impl Indexer {
         self.perf_stats.last_repo_file_count = seen.len();
         self.record_repo_elapsed(started.elapsed().as_millis());
         self.persist_perf_stats(repo_path)?;
+        write_index_coverage_manifest(
+            repo_path,
+            IndexCoverageManifest {
+                version: default_manifest_version(),
+                coverage_mode: "full".to_string(),
+                targeted_paths: vec![".".to_string()],
+            },
+        )?;
         Ok(())
     }
 
@@ -242,6 +282,19 @@ impl Indexer {
         self.perf_stats.last_repo_file_count = files.len();
         self.record_repo_elapsed(started.elapsed().as_millis());
         self.persist_perf_stats(repo_path)?;
+        let mut manifest = load_index_coverage_manifest(repo_path).unwrap_or_default();
+        if manifest.coverage_mode != "full" {
+            manifest.coverage_mode = "targeted".to_string();
+            for path in relative_paths {
+                let normalized = normalize_manifest_path(path);
+                if !normalized.is_empty() && !manifest.targeted_paths.iter().any(|p| p == &normalized)
+                {
+                    manifest.targeted_paths.push(normalized);
+                }
+            }
+            manifest.targeted_paths.sort();
+            write_index_coverage_manifest(repo_path, manifest)?;
+        }
         Ok(())
     }
 
@@ -410,6 +463,28 @@ impl Indexer {
         fs::write(path, serde_json::to_string_pretty(&payload)?)?;
         Ok(())
     }
+}
+
+fn index_manifest_path(repo_path: &Path) -> PathBuf {
+    repo_path.join(".semantic").join("index_manifest.json")
+}
+
+fn normalize_manifest_path(path: &str) -> String {
+    path.trim().replace('\\', "/").trim_matches('/').to_string()
+}
+
+fn load_index_coverage_manifest(repo_path: &Path) -> Option<IndexCoverageManifest> {
+    let raw = fs::read_to_string(index_manifest_path(repo_path)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_index_coverage_manifest(repo_path: &Path, manifest: IndexCoverageManifest) -> Result<()> {
+    let path = index_manifest_path(repo_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(&manifest)?)?;
+    Ok(())
 }
 
 fn should_skip_indexing_path(relative_path: &str) -> bool {
