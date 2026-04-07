@@ -304,6 +304,10 @@ impl AppRuntime {
                         if let Some(obj) = retried.as_object_mut() {
                             obj.insert("auto_index_applied".to_string(), json!(true));
                             obj.insert("auto_index_target".to_string(), json!(target));
+                            obj.insert(
+                                "index_recovery_target_kind".to_string(),
+                                json!(index_recovery_target_kind(target)),
+                            );
                             obj.insert("indexed_file_count".to_string(), json!(indexed_files.len()));
                             obj.insert(
                                 "indexed_path_hints".to_string(),
@@ -318,6 +322,10 @@ impl AppRuntime {
                                     "index_recovery_mode".to_string(),
                                     json!("auto_index_applied"),
                                 );
+                                verification.insert(
+                                    "index_recovery_target_kind".to_string(),
+                                    json!(index_recovery_target_kind(target)),
+                                );
                             }
                             if let Some(result) =
                                 obj.get_mut("result").and_then(|v| v.as_object_mut())
@@ -326,12 +334,20 @@ impl AppRuntime {
                                     "index_recovery_mode".to_string(),
                                     json!("auto_index_applied"),
                                 );
+                                result.insert(
+                                    "index_recovery_target_kind".to_string(),
+                                    json!(index_recovery_target_kind(target)),
+                                );
                             }
                         }
                     } else if let Some(obj) = retried.as_object_mut() {
                         obj.insert(
                             "index_recovery_mode".to_string(),
                             json!("auto_index_attempted_no_change"),
+                        );
+                        obj.insert(
+                            "index_recovery_target_kind".to_string(),
+                            json!(index_recovery_target_kind(target)),
                         );
                         if let Some(verification) =
                             obj.get_mut("verification").and_then(|v| v.as_object_mut())
@@ -340,6 +356,10 @@ impl AppRuntime {
                                 "index_recovery_mode".to_string(),
                                 json!("auto_index_attempted_no_change"),
                             );
+                            verification.insert(
+                                "index_recovery_target_kind".to_string(),
+                                json!(index_recovery_target_kind(target)),
+                            );
                         }
                         if let Some(result) =
                             obj.get_mut("result").and_then(|v| v.as_object_mut())
@@ -347,6 +367,10 @@ impl AppRuntime {
                             result.insert(
                                 "index_recovery_mode".to_string(),
                                 json!("auto_index_attempted_no_change"),
+                            );
+                            result.insert(
+                                "index_recovery_target_kind".to_string(),
+                                json!(index_recovery_target_kind(target)),
                             );
                         }
                     }
@@ -484,6 +508,10 @@ impl AppRuntime {
             );
             obj.insert("index_coverage".to_string(), json!(index_coverage));
             if let Some(target) = index_coverage_target.clone() {
+                obj.insert(
+                    "index_recovery_target_kind".to_string(),
+                    json!(index_recovery_target_kind(target.as_str())),
+                );
                 obj.insert("index_coverage_target".to_string(), json!(target));
                 if let Some(command) =
                     suggested_index_command(index_coverage, Some(target.as_str()))
@@ -562,6 +590,10 @@ impl AppRuntime {
             );
             obj.insert("index_coverage".to_string(), json!(index_coverage));
             if let Some(target) = index_coverage_target.clone() {
+                obj.insert(
+                    "index_recovery_target_kind".to_string(),
+                    json!(index_recovery_target_kind(target.as_str())),
+                );
                 obj.insert("index_coverage_target".to_string(), json!(target));
                 if let Some(command) =
                     suggested_index_command(index_coverage, Some(target.as_str()))
@@ -1439,6 +1471,14 @@ fn index_recovery_mode(auto_index_requested: bool, coverage: &str) -> &'static s
         "suggest_only"
     } else {
         "none"
+    }
+}
+
+fn index_recovery_target_kind(target: &str) -> &'static str {
+    if looks_like_file_path(target) {
+        "file"
+    } else {
+        "directory"
     }
 }
 
@@ -3116,6 +3156,12 @@ mod tests {
         );
         assert_eq!(
             verification
+                .get("index_recovery_target_kind")
+                .and_then(|v| v.as_str()),
+            Some("directory")
+        );
+        assert_eq!(
+            verification
                 .get("index_coverage")
                 .and_then(|v| v.as_str()),
             Some("unindexed_target")
@@ -3203,6 +3249,10 @@ mod tests {
             Some("auto_index_applied")
         );
         assert_eq!(
+            value.get("index_recovery_target_kind").and_then(|v| v.as_str()),
+            Some("directory")
+        );
+        assert_eq!(
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
         );
@@ -3223,7 +3273,7 @@ mod tests {
             verification
                 .get("index_recovery_mode")
                 .and_then(|v| v.as_str()),
-            Some("auto_index_attempted_no_change")
+            Some("auto_index_applied")
         );
         assert_eq!(
             verification
@@ -3383,6 +3433,10 @@ mod tests {
             value.get("index_recovery_mode").and_then(|v| v.as_str()),
             Some("auto_index_attempted_no_change")
         );
+        assert_eq!(
+            value.get("index_recovery_target_kind").and_then(|v| v.as_str()),
+            Some("directory")
+        );
         let verification = value.get("verification").expect("verification");
         assert_eq!(
             verification
@@ -3395,6 +3449,12 @@ mod tests {
                 .get("index_recovery_mode")
                 .and_then(|v| v.as_str()),
             Some("auto_index_attempted_no_change")
+        );
+        assert_eq!(
+            verification
+                .get("index_recovery_target_kind")
+                .and_then(|v| v.as_str()),
+            Some("directory")
         );
         assert_eq!(
             verification

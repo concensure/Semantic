@@ -117,6 +117,7 @@ Current implementation status:
   - explicit partial-index coverage signaling in retrieve/route outputs via:
     - `index_readiness`
     - `index_recovery_mode`
+    - `index_recovery_target_kind`
     - `index_coverage`
     - `index_coverage_target`
     - route issue: `target_path_not_indexed`

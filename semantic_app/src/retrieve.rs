@@ -371,6 +371,10 @@ impl AppRuntime {
                                         serde_json::json!(target),
                                     );
                                     obj.insert(
+                                        "index_recovery_target_kind".to_string(),
+                                        serde_json::json!(index_recovery_target_kind(target)),
+                                    );
+                                    obj.insert(
                                         "indexed_file_count".to_string(),
                                         serde_json::json!(indexed_files.len()),
                                     );
@@ -395,6 +399,10 @@ impl AppRuntime {
                                             "index_recovery_mode".to_string(),
                                             serde_json::json!("auto_index_applied"),
                                         );
+                                        result.insert(
+                                            "index_recovery_target_kind".to_string(),
+                                            serde_json::json!(index_recovery_target_kind(target)),
+                                        );
                                     }
                                 }
                             } else if let Some(obj) = retried.as_object_mut() {
@@ -402,12 +410,20 @@ impl AppRuntime {
                                     "index_recovery_mode".to_string(),
                                     serde_json::json!("auto_index_attempted_no_change"),
                                 );
+                                obj.insert(
+                                    "index_recovery_target_kind".to_string(),
+                                    serde_json::json!(index_recovery_target_kind(target)),
+                                );
                                 if let Some(result) =
                                     obj.get_mut("result").and_then(|v| v.as_object_mut())
                                 {
                                     result.insert(
                                         "index_recovery_mode".to_string(),
                                         serde_json::json!("auto_index_attempted_no_change"),
+                                    );
+                                    result.insert(
+                                        "index_recovery_target_kind".to_string(),
+                                        serde_json::json!(index_recovery_target_kind(target)),
                                     );
                                 }
                             }
@@ -421,6 +437,10 @@ impl AppRuntime {
                     );
                     obj.insert("index_coverage".to_string(), serde_json::json!(coverage));
                     if let Some(target) = target {
+                        obj.insert(
+                            "index_recovery_target_kind".to_string(),
+                            serde_json::json!(index_recovery_target_kind(target.as_str())),
+                        );
                         obj.insert("index_coverage_target".to_string(), serde_json::json!(target));
                         if let Some(command) =
                             suggested_index_command(coverage, Some(target.as_str()))
@@ -540,11 +560,19 @@ fn index_recovery_mode(auto_index_requested: bool, coverage: &str) -> &'static s
     }
 }
 
+fn index_recovery_target_kind(target: &str) -> &'static str {
+    if looks_like_file_path(target) {
+        "file"
+    } else {
+        "directory"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         compute_index_coverage, index_readiness, index_recovery_mode,
-        retrieve_coverage_resolved, suggested_index_command,
+        index_recovery_target_kind, retrieve_coverage_resolved, suggested_index_command,
     };
     use crate::{runtime::AppRuntime, RuntimeOptions};
     use engine::{Operation, RetrievalRequest};
@@ -627,6 +655,12 @@ mod tests {
     }
 
     #[test]
+    fn index_recovery_target_kind_distinguishes_file_and_directory() {
+        assert_eq!(index_recovery_target_kind("src/worker/job.ts"), "file");
+        assert_eq!(index_recovery_target_kind("src/worker"), "directory");
+    }
+
+    #[test]
     fn retrieve_can_auto_index_exact_file_target() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("repo");
@@ -690,6 +724,10 @@ mod tests {
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
         );
+        assert_eq!(
+            value.get("index_recovery_target_kind").and_then(|v| v.as_str()),
+            Some("file")
+        );
         assert!(
             value.get("indexed_path_hints")
                 .and_then(|v| v.as_array())
@@ -704,6 +742,12 @@ mod tests {
         assert_eq!(
             result.get("index_recovery_mode").and_then(|v| v.as_str()),
             Some("auto_index_applied")
+        );
+        assert_eq!(
+            result
+                .get("index_recovery_target_kind")
+                .and_then(|v| v.as_str()),
+            Some("file")
         );
         assert_eq!(
             result.get("index_coverage").and_then(|v| v.as_str()),
