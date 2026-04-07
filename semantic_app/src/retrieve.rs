@@ -345,6 +345,7 @@ impl AppRuntime {
                         request_file_hint.as_deref(),
                         request_path_hint.as_deref(),
                     );
+                    let readiness = index_readiness(indexed_files.len(), coverage);
                     if body.auto_index_target.unwrap_or(false) && coverage == "unindexed_target" {
                         if let Some(target) = target.as_deref() {
                             self.indexer()
@@ -378,11 +379,16 @@ impl AppRuntime {
                                             &indexed_files
                                         )),
                                     );
+                                    obj.insert(
+                                        "index_readiness".to_string(),
+                                        serde_json::json!(index_readiness(indexed_files.len(), "indexed_target")),
+                                    );
                                 }
                             }
                             return Ok(retried);
                         }
                     }
+                    obj.insert("index_readiness".to_string(), serde_json::json!(readiness));
                     obj.insert("index_coverage".to_string(), serde_json::json!(coverage));
                     if let Some(target) = target {
                         obj.insert("index_coverage_target".to_string(), serde_json::json!(target));
@@ -482,10 +488,23 @@ fn retrieve_coverage_resolved(value: &serde_json::Value, target: &str) -> bool {
     coverage != Some("unindexed_target") || current_target != Some(target)
 }
 
+fn index_readiness(indexed_file_count: usize, coverage: &str) -> &'static str {
+    if indexed_file_count == 0 || coverage == "unindexed_repo" {
+        "unindexed_repo"
+    } else if coverage == "indexed_target" {
+        "target_ready"
+    } else if coverage == "unindexed_target" {
+        "partial_index_missing_target"
+    } else {
+        "indexed_repo"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_index_coverage, retrieve_coverage_resolved, suggested_index_command,
+        compute_index_coverage, index_readiness, retrieve_coverage_resolved,
+        suggested_index_command,
     };
     use crate::{runtime::AppRuntime, RuntimeOptions};
     use engine::{Operation, RetrievalRequest};
@@ -536,12 +555,24 @@ mod tests {
         });
         let resolved = serde_json::json!({
             "result": {
+                "index_readiness": "target_ready",
                 "index_coverage": "indexed_target",
                 "index_coverage_target": "src/worker"
             }
         });
         assert!(!retrieve_coverage_resolved(&unresolved, "src/worker"));
         assert!(retrieve_coverage_resolved(&resolved, "src/worker"));
+    }
+
+    #[test]
+    fn index_readiness_marks_partial_index_missing_target() {
+        assert_eq!(index_readiness(0, "unindexed_repo"), "unindexed_repo");
+        assert_eq!(index_readiness(1, "indexed_target"), "target_ready");
+        assert_eq!(
+            index_readiness(1, "unindexed_target"),
+            "partial_index_missing_target"
+        );
+        assert_eq!(index_readiness(1, "indexed_repo"), "indexed_repo");
     }
 
     #[test]
@@ -616,8 +647,16 @@ mod tests {
         );
         let result = value.get("result").expect("result");
         assert_eq!(
+            result.get("index_readiness").and_then(|v| v.as_str()),
+            Some("target_ready")
+        );
+        assert_eq!(
             result.get("index_coverage").and_then(|v| v.as_str()),
             Some("indexed_target")
+        );
+        assert_eq!(
+            result.get("index_readiness").and_then(|v| v.as_str()),
+            Some("target_ready")
         );
         assert_eq!(
             result.get("index_coverage_target").and_then(|v| v.as_str()),

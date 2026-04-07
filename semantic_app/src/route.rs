@@ -282,6 +282,7 @@ impl AppRuntime {
             current_top_file_for_addons.as_deref(),
             route_path_hint.as_deref(),
         );
+        let route_index_readiness = index_readiness(indexed_files.len(), index_coverage);
         if body.auto_index_target.unwrap_or(false) && index_coverage == "unindexed_target" {
             if let Some(target) = index_coverage_target.as_deref() {
                 if self
@@ -307,6 +308,7 @@ impl AppRuntime {
                                 "indexed_path_hints".to_string(),
                                 json!(summarize_indexed_path_hints(&indexed_files)),
                             );
+                            obj.insert("index_readiness".to_string(), json!("target_ready"));
                         }
                     }
                     return retried;
@@ -436,6 +438,7 @@ impl AppRuntime {
             }
         }
         if let Some(obj) = verification.as_object_mut() {
+            obj.insert("index_readiness".to_string(), json!(route_index_readiness));
             obj.insert("index_coverage".to_string(), json!(index_coverage));
             if let Some(target) = index_coverage_target.clone() {
                 obj.insert("index_coverage_target".to_string(), json!(target));
@@ -509,6 +512,7 @@ impl AppRuntime {
                     intent
                 )),
             );
+            obj.insert("index_readiness".to_string(), json!(route_index_readiness));
             obj.insert("index_coverage".to_string(), json!(index_coverage));
             if let Some(target) = index_coverage_target.clone() {
                 obj.insert("index_coverage_target".to_string(), json!(target));
@@ -1367,6 +1371,18 @@ fn route_coverage_resolved(value: &serde_json::Value, target: &str) -> bool {
         .get("index_coverage_target")
         .and_then(|v| v.as_str());
     coverage != Some("unindexed_target") || current_target != Some(target)
+}
+
+fn index_readiness(indexed_file_count: usize, coverage: &str) -> &'static str {
+    if indexed_file_count == 0 || coverage == "unindexed_repo" {
+        "unindexed_repo"
+    } else if coverage == "indexed_target" {
+        "target_ready"
+    } else if coverage == "unindexed_target" {
+        "partial_index_missing_target"
+    } else {
+        "indexed_repo"
+    }
 }
 
 fn route_content_kind(top_context_file: Option<&str>, task: &str, intent: &str) -> &'static str {
@@ -3031,6 +3047,12 @@ mod tests {
         let verification = value.get("verification").expect("verification");
         assert_eq!(
             verification
+                .get("index_readiness")
+                .and_then(|v| v.as_str()),
+            Some("partial_index_missing_target")
+        );
+        assert_eq!(
+            verification
                 .get("index_coverage")
                 .and_then(|v| v.as_str()),
             Some("unindexed_target")
@@ -3126,6 +3148,12 @@ mod tests {
         let verification = value.get("verification").expect("verification");
         assert_eq!(
             verification
+                .get("index_readiness")
+                .and_then(|v| v.as_str()),
+            Some("target_ready")
+        );
+        assert_eq!(
+            verification
                 .get("index_coverage")
                 .and_then(|v| v.as_str()),
             Some("indexed_target")
@@ -3205,6 +3233,12 @@ mod tests {
         let verification = value.get("verification").expect("verification");
         assert_eq!(
             verification
+                .get("index_readiness")
+                .and_then(|v| v.as_str()),
+            Some("target_ready")
+        );
+        assert_eq!(
+            verification
                 .get("index_coverage_target")
                 .and_then(|v| v.as_str()),
             Some("src/worker/job.ts")
@@ -3263,6 +3297,12 @@ mod tests {
 
         assert_eq!(value.get("auto_index_applied"), None);
         let verification = value.get("verification").expect("verification");
+        assert_eq!(
+            verification
+                .get("index_readiness")
+                .and_then(|v| v.as_str()),
+            Some("partial_index_missing_target")
+        );
         assert_eq!(
             verification
                 .get("index_coverage")

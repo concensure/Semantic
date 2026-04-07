@@ -115,6 +115,7 @@ Current implementation status:
   - surfaced indexed coverage hints via:
     - `indexed_path_hints`
   - explicit partial-index coverage signaling in retrieve/route outputs via:
+    - `index_readiness`
     - `index_coverage`
     - `index_coverage_target`
     - route issue: `target_path_not_indexed`

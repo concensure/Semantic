@@ -124,6 +124,7 @@ indexed_path_hints: src/auth | packages/api/src
 
 Retrieve and route flows now also surface coverage boundaries directly:
 
+- `index_readiness`
 - `index_coverage`
 - `index_coverage_target`
 - `suggested_index_command`
@@ -137,6 +138,13 @@ That makes partial indexing explicit in normal CLI use instead of only degrading
 ```text
 index_follow_up: semantic index --path src/worker
 ```
+
+`index_readiness` is the compact machine-readable summary:
+
+- `unindexed_repo`
+- `target_ready`
+- `partial_index_missing_target`
+- `indexed_repo`
 
 If you want Semantic to repair that gap automatically once, route and retrieve now support an explicit opt-in:
 

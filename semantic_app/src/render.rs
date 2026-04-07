@@ -1184,6 +1184,12 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                         out.push_str(&format!("\nindex_coverage: {index_coverage}"));
                     }
                 }
+                if let Some(index_readiness) = verification
+                    .get("index_readiness")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!("\nindex_readiness: {index_readiness}"));
+                }
                 if let Some(command) = verification
                     .get("suggested_index_command")
                     .and_then(|v| v.as_str())
@@ -1469,6 +1475,12 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
             }
             if let Some(result) = value.get("result") {
                 out.push_str(&format!("\nresult: {}", summarize_value(result, verbose)));
+                if let Some(index_readiness) = result
+                    .get("index_readiness")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!("\nindex_readiness: {index_readiness}"));
+                }
                 if let Some(command) = result
                     .get("suggested_index_command")
                     .and_then(|v| v.as_str())
@@ -2258,6 +2270,7 @@ mod tests {
                 "status": "high_confidence",
                 "recommended_action": "safe to proceed with semantic context",
                 "mutation_state": "ready",
+                "index_readiness": "target_ready",
                 "index_coverage": "indexed_target",
                 "index_coverage_target": "src/config/loadConfig.ts",
                 "mutation_bundle": {
@@ -2282,6 +2295,7 @@ mod tests {
         ));
         assert!(rendered.contains("mutation_safety: ready"));
         assert!(rendered.contains("mutation_bundle: exact_ready"));
+        assert!(rendered.contains("index_readiness: target_ready"));
         assert!(rendered.contains("index_coverage: indexed_target @ src/config/loadConfig.ts"));
         assert!(!rendered.contains("verification_issue:"));
         assert!(!rendered.contains("verification_follow_up:"));
@@ -2294,6 +2308,7 @@ mod tests {
             "selected_tool": "get_directory_brief",
             "verification": {
                 "status": "needs_review",
+                "index_readiness": "partial_index_missing_target",
                 "recommended_action": "review returned spans",
                 "index_coverage": "unindexed_target",
                 "index_coverage_target": "src/worker",
@@ -2303,6 +2318,7 @@ mod tests {
             "result": {}
         });
         let rendered = text_output(&value, false);
+        assert!(rendered.contains("index_readiness: partial_index_missing_target"));
         assert!(rendered.contains("index_coverage: unindexed_target @ src/worker"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
         assert!(rendered.contains("verification_issue: target_path_not_indexed"));
@@ -2314,6 +2330,7 @@ mod tests {
             "ok": true,
             "operation": "get_directory_brief",
             "result": {
+                "index_readiness": "partial_index_missing_target",
                 "summary_text": "src/worker: 4 files",
                 "index_coverage": "unindexed_target",
                 "index_coverage_target": "src/worker",
@@ -2321,6 +2338,7 @@ mod tests {
             }
         });
         let rendered = text_output(&value, false);
+        assert!(rendered.contains("index_readiness: partial_index_missing_target"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
     }
 
