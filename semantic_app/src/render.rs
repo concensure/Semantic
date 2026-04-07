@@ -1115,6 +1115,9 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     indexed_path_hints.join(" | ")
                 ));
             }
+            if let Some(delta) = format_index_recovery_delta(value.get("index_recovery_delta")) {
+                out.push_str(&format!("\nindex_recovery_delta: {delta}"));
+            }
         }
         if let Some(tool) = value.get("selected_tool").and_then(|v| v.as_str()) {
             out.push_str(&format!("\nselected_tool: {tool}"));
@@ -1486,6 +1489,11 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                         indexed_path_hints.join(" | ")
                     ));
                 }
+                if let Some(delta) =
+                    format_index_recovery_delta(value.get("index_recovery_delta"))
+                {
+                    out.push_str(&format!("\nindex_recovery_delta: {delta}"));
+                }
             }
             if let Some(result) = value.get("result") {
                 out.push_str(&format!("\nresult: {}", summarize_value(result, verbose)));
@@ -1520,6 +1528,28 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
         }
     }
     summarize_value(value, verbose)
+}
+
+fn format_index_recovery_delta(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    let added_file_count = value.get("added_file_count").and_then(|v| v.as_u64())?;
+    let changed_files = value
+        .get("changed_files")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items.iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if changed_files.is_empty() {
+        Some(format!("+{added_file_count} file(s)"))
+    } else {
+        Some(format!(
+            "+{added_file_count} file(s): {}",
+            changed_files.join(" | ")
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -2390,6 +2420,10 @@ mod tests {
             "auto_index_target": "src/worker/job.ts",
             "indexed_file_count": 2,
             "indexed_path_hints": ["src/auth", "src/worker"],
+            "index_recovery_delta": {
+                "added_file_count": 1,
+                "changed_files": ["src/worker/job.ts"]
+            },
             "verification": {
                 "status": "low_confidence",
                 "index_recovery_mode": "auto_index_applied",
@@ -2403,6 +2437,7 @@ mod tests {
         assert!(rendered.contains("auto_index: applied @ src/worker/job.ts"));
         assert!(rendered.contains("indexed_file_count: 2"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
+        assert!(rendered.contains("index_recovery_delta: +1 file(s): src/worker/job.ts"));
         assert!(rendered.contains("index_recovery_mode: auto_index_applied"));
         assert!(rendered.contains("index_recovery_target_kind: file"));
     }
@@ -2416,6 +2451,10 @@ mod tests {
             "auto_index_target": "src/worker/job.ts",
             "indexed_file_count": 2,
             "indexed_path_hints": ["src/auth", "src/worker"],
+            "index_recovery_delta": {
+                "added_file_count": 1,
+                "changed_files": ["src/worker/job.ts"]
+            },
             "result": {
                 "index_recovery_mode": "auto_index_applied",
                 "index_recovery_target_kind": "file",
@@ -2427,6 +2466,7 @@ mod tests {
         assert!(rendered.contains("auto_index: applied @ src/worker/job.ts"));
         assert!(rendered.contains("indexed_file_count: 2"));
         assert!(rendered.contains("indexed_path_hints: src/auth | src/worker"));
+        assert!(rendered.contains("index_recovery_delta: +1 file(s): src/worker/job.ts"));
         assert!(rendered.contains("index_recovery_mode: auto_index_applied"));
         assert!(rendered.contains("index_recovery_target_kind: file"));
     }

@@ -127,6 +127,7 @@ Retrieve and route flows now also surface coverage boundaries directly:
 - `index_readiness`
 - `index_recovery_mode`
 - `index_recovery_target_kind`
+- `index_recovery_delta`
 - `index_coverage`
 - `index_coverage_target`
 - `suggested_index_command`
@@ -154,6 +155,11 @@ index_follow_up: semantic index --path src/worker
 - `suggest_only`
 - `auto_index_applied`
 - `auto_index_attempted_no_change`
+
+`index_recovery_delta` summarizes what newly entered the indexed set after a successful auto-index retry:
+
+- `added_file_count`
+- `changed_files`
 
 `index_recovery_target_kind` tells you whether the recovery target was:
 

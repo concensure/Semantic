@@ -1,5 +1,5 @@
 use crate::models::RetrieveRequestBody;
-use crate::runtime::summarize_indexed_path_hints;
+use crate::runtime::{summarize_index_recovery_delta, summarize_indexed_path_hints};
 use crate::runtime::AppRuntime;
 use crate::session::{
     apply_session_context_reuse, apply_session_raw_expansion_controls, touch_or_create_session,
@@ -349,6 +349,7 @@ impl AppRuntime {
                     let auto_index_requested = body.auto_index_target.unwrap_or(false);
                     if body.auto_index_target.unwrap_or(false) && coverage == "unindexed_target" {
                         if let Some(target) = target.as_deref() {
+                            let indexed_files_before = indexed_files.clone();
                             self.indexer()
                                 .lock()
                                 .index_paths(self.repo_root(), &[target.to_string()])?;
@@ -361,6 +362,11 @@ impl AppRuntime {
                                     .lock()
                                     .with_storage(|storage| storage.list_files())
                                     .unwrap_or_default();
+                                let (added_file_count, changed_files) =
+                                    summarize_index_recovery_delta(
+                                        &indexed_files_before,
+                                        &indexed_files,
+                                    );
                                 if let Some(obj) = retried.as_object_mut() {
                                     obj.insert(
                                         "auto_index_applied".to_string(),
@@ -385,6 +391,13 @@ impl AppRuntime {
                                         )),
                                     );
                                     obj.insert(
+                                        "index_recovery_delta".to_string(),
+                                        serde_json::json!({
+                                            "added_file_count": added_file_count,
+                                            "changed_files": changed_files,
+                                        }),
+                                    );
+                                    obj.insert(
                                         "index_readiness".to_string(),
                                         serde_json::json!(index_readiness(indexed_files.len(), "indexed_target")),
                                     );
@@ -402,6 +415,13 @@ impl AppRuntime {
                                         result.insert(
                                             "index_recovery_target_kind".to_string(),
                                             serde_json::json!(index_recovery_target_kind(target)),
+                                        );
+                                        result.insert(
+                                            "index_recovery_delta".to_string(),
+                                            serde_json::json!({
+                                                "added_file_count": added_file_count,
+                                                "changed_files": changed_files,
+                                            }),
                                         );
                                     }
                                 }
@@ -728,6 +748,20 @@ mod tests {
             value.get("index_recovery_target_kind").and_then(|v| v.as_str()),
             Some("file")
         );
+        assert_eq!(
+            value.get("index_recovery_delta")
+                .and_then(|v| v.get("added_file_count"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            value.get("index_recovery_delta")
+                .and_then(|v| v.get("changed_files"))
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|v| v.as_str()),
+            Some("src/worker/job.ts")
+        );
         assert!(
             value.get("indexed_path_hints")
                 .and_then(|v| v.as_array())
@@ -748,6 +782,13 @@ mod tests {
                 .get("index_recovery_target_kind")
                 .and_then(|v| v.as_str()),
             Some("file")
+        );
+        assert_eq!(
+            result
+                .get("index_recovery_delta")
+                .and_then(|v| v.get("added_file_count"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
         );
         assert_eq!(
             result.get("index_coverage").and_then(|v| v.as_str()),

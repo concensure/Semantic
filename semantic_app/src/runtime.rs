@@ -277,9 +277,27 @@ pub(crate) fn summarize_indexed_path_hints(files: &[String]) -> Vec<String> {
     ranked.into_iter().take(8).map(|(path, _)| path).collect()
 }
 
+pub(crate) fn summarize_index_recovery_delta(
+    before: &[String],
+    after: &[String],
+) -> (usize, Vec<String>) {
+    let before_set = before.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let mut added = after
+        .iter()
+        .filter(|path| !before_set.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    added.sort();
+    let added_file_count = added.len();
+    let changed_files = added.into_iter().take(8).collect::<Vec<_>>();
+    (added_file_count, changed_files)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppRuntime, BootstrapIndexPolicy, RuntimeOptions};
+    use super::{
+        summarize_index_recovery_delta, AppRuntime, BootstrapIndexPolicy, RuntimeOptions,
+    };
     use std::fs;
 
     #[test]
@@ -386,6 +404,26 @@ mod tests {
         );
         assert_eq!(status.get("index_available").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(status.get("indexed_file_count").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn summarize_index_recovery_delta_reports_new_files_only() {
+        let before = vec!["src/auth/session.ts".to_string()];
+        let after = vec![
+            "src/auth/session.ts".to_string(),
+            "src/worker/job.ts".to_string(),
+            "src/worker/queue.ts".to_string(),
+        ];
+
+        let (count, files) = summarize_index_recovery_delta(&before, &after);
+        assert_eq!(count, 2);
+        assert_eq!(
+            files,
+            vec![
+                "src/worker/job.ts".to_string(),
+                "src/worker/queue.ts".to_string()
+            ]
+        );
     }
 }
 

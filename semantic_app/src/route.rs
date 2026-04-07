@@ -1,5 +1,5 @@
 use crate::models::IdeAutoRouteRequest;
-use crate::runtime::summarize_indexed_path_hints;
+use crate::runtime::{summarize_index_recovery_delta, summarize_indexed_path_hints};
 use crate::runtime::AppRuntime;
 use crate::session::{
     apply_session_context_reuse, apply_session_raw_expansion_controls, auto_session_id,
@@ -286,6 +286,7 @@ impl AppRuntime {
         let auto_index_requested = body.auto_index_target.unwrap_or(false);
         if body.auto_index_target.unwrap_or(false) && index_coverage == "unindexed_target" {
             if let Some(target) = index_coverage_target.as_deref() {
+                let indexed_files_before = indexed_files.clone();
                 if self
                     .indexer()
                     .lock()
@@ -301,6 +302,8 @@ impl AppRuntime {
                             .lock()
                             .with_storage(|storage| storage.list_files())
                             .unwrap_or_default();
+                        let (added_file_count, changed_files) =
+                            summarize_index_recovery_delta(&indexed_files_before, &indexed_files);
                         if let Some(obj) = retried.as_object_mut() {
                             obj.insert("auto_index_applied".to_string(), json!(true));
                             obj.insert("auto_index_target".to_string(), json!(target));
@@ -312,6 +315,13 @@ impl AppRuntime {
                             obj.insert(
                                 "indexed_path_hints".to_string(),
                                 json!(summarize_indexed_path_hints(&indexed_files)),
+                            );
+                            obj.insert(
+                                "index_recovery_delta".to_string(),
+                                json!({
+                                    "added_file_count": added_file_count,
+                                    "changed_files": changed_files,
+                                }),
                             );
                             obj.insert("index_readiness".to_string(), json!("target_ready"));
                             obj.insert("index_recovery_mode".to_string(), json!("auto_index_applied"));
@@ -326,6 +336,13 @@ impl AppRuntime {
                                     "index_recovery_target_kind".to_string(),
                                     json!(index_recovery_target_kind(target)),
                                 );
+                                verification.insert(
+                                    "index_recovery_delta".to_string(),
+                                    json!({
+                                        "added_file_count": added_file_count,
+                                        "changed_files": changed_files,
+                                    }),
+                                );
                             }
                             if let Some(result) =
                                 obj.get_mut("result").and_then(|v| v.as_object_mut())
@@ -337,6 +354,13 @@ impl AppRuntime {
                                 result.insert(
                                     "index_recovery_target_kind".to_string(),
                                     json!(index_recovery_target_kind(target)),
+                                );
+                                result.insert(
+                                    "index_recovery_delta".to_string(),
+                                    json!({
+                                        "added_file_count": added_file_count,
+                                        "changed_files": changed_files,
+                                    }),
                                 );
                             }
                         }
@@ -3253,6 +3277,20 @@ mod tests {
             Some("directory")
         );
         assert_eq!(
+            value.get("index_recovery_delta")
+                .and_then(|v| v.get("added_file_count"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            value.get("index_recovery_delta")
+                .and_then(|v| v.get("changed_files"))
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|v| v.as_str()),
+            Some("src/worker/job.ts")
+        );
+        assert_eq!(
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
         );
@@ -3274,6 +3312,13 @@ mod tests {
                 .get("index_recovery_mode")
                 .and_then(|v| v.as_str()),
             Some("auto_index_applied")
+        );
+        assert_eq!(
+            verification
+                .get("index_recovery_delta")
+                .and_then(|v| v.get("added_file_count"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
         );
         assert_eq!(
             verification
@@ -3356,6 +3401,12 @@ mod tests {
         assert_eq!(
             value.get("indexed_file_count").and_then(|v| v.as_u64()),
             Some(2)
+        );
+        assert_eq!(
+            value.get("index_recovery_delta")
+                .and_then(|v| v.get("added_file_count"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
         );
         let verification = value.get("verification").expect("verification");
         assert_eq!(
