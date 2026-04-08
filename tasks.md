@@ -116,6 +116,7 @@ Current implementation status:
     - `indexed_path_hints`
     - `index_region_status`
     - `indexed_region_hints`
+    - presentation filtering so staged coverage hints suppress `.semantic/`, `.claude/`, and fixture worktree internals without changing actual indexed coverage
     - explicit partial-index coverage signaling in retrieve/route outputs via:
       - `index_readiness`
       - `index_region_status`

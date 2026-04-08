@@ -273,6 +273,9 @@ impl Drop for RepoIndexLock {
 pub(crate) fn summarize_indexed_path_hints(files: &[String]) -> Vec<String> {
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     for file in files {
+        if is_internal_index_summary_path(file) {
+            continue;
+        }
         let hint = Path::new(file)
             .parent()
             .and_then(|parent| parent.to_str())
@@ -287,6 +290,33 @@ pub(crate) fn summarize_indexed_path_hints(files: &[String]) -> Vec<String> {
     ranked.into_iter().take(8).map(|(path, _)| path).collect()
 }
 
+fn is_internal_index_summary_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let components = normalized
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+
+    if components
+        .iter()
+        .any(|component| matches!(*component, ".semantic" | ".claude"))
+    {
+        return true;
+    }
+
+    let has_fixture_segment = components.iter().any(|component| {
+        component.eq_ignore_ascii_case("fixture")
+            || component.eq_ignore_ascii_case("fixtures")
+            || component.eq_ignore_ascii_case("test_fixture")
+            || component.eq_ignore_ascii_case("test_fixtures")
+    });
+    let has_worktree_segment = components.iter().any(|component| {
+        component.eq_ignore_ascii_case("worktree") || component.eq_ignore_ascii_case("worktrees")
+    });
+
+    has_fixture_segment && has_worktree_segment
+}
+
 pub(crate) fn summarize_index_recovery_delta(
     before: &[String],
     after: &[String],
@@ -299,7 +329,12 @@ pub(crate) fn summarize_index_recovery_delta(
         .collect::<Vec<_>>();
     added.sort();
     let added_file_count = added.len();
-    let changed_files = added.into_iter().take(8).collect::<Vec<_>>();
+    let changed_files = added
+        .iter()
+        .filter(|path| !is_internal_index_summary_path(path))
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
     (added_file_count, changed_files)
 }
 
@@ -335,8 +370,8 @@ pub(crate) fn index_region_status(
 #[cfg(test)]
 mod tests {
     use super::{
-        index_region_status, summarize_index_recovery_delta, AppRuntime, BootstrapIndexPolicy,
-        RuntimeOptions,
+        index_region_status, summarize_index_recovery_delta, summarize_indexed_path_hints,
+        AppRuntime, BootstrapIndexPolicy, RuntimeOptions,
     };
     use std::fs;
 
@@ -479,6 +514,35 @@ mod tests {
                 "src/worker/queue.ts".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn summarize_indexed_path_hints_filters_internal_runtime_paths() {
+        let hints = summarize_indexed_path_hints(&[
+            "src/auth/session.ts".to_string(),
+            "src/auth/token.ts".to_string(),
+            ".semantic/index_manifest.json".to_string(),
+            ".claude/worktrees/task-123/src/generated.ts".to_string(),
+            "tests/fixtures/worktrees/tmp/src/fixture-only.ts".to_string(),
+            "packages/api/src/server.ts".to_string(),
+        ]);
+
+        assert_eq!(hints, vec!["src/auth", "packages/api/src"]);
+    }
+
+    #[test]
+    fn summarize_index_recovery_delta_keeps_true_count_but_filters_internal_samples() {
+        let before = vec!["src/auth/session.ts".to_string()];
+        let after = vec![
+            "src/auth/session.ts".to_string(),
+            ".semantic/index_manifest.json".to_string(),
+            ".claude/worktrees/task-123/src/generated.ts".to_string(),
+            "src/worker/job.ts".to_string(),
+        ];
+
+        let (count, files) = summarize_index_recovery_delta(&before, &after);
+        assert_eq!(count, 3);
+        assert_eq!(files, vec!["src/worker/job.ts".to_string()]);
     }
 
     #[test]

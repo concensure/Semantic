@@ -126,6 +126,8 @@ After targeted indexing, `semantic status` will surface those ready regions thro
 indexed_path_hints: src/auth | packages/api/src
 ```
 
+Those hint summaries are presentation-only. They now suppress internal/generated paths such as `.semantic/`, `.claude/`, and fixture worktree internals so staged onboarding keeps real source roots prominent. Coverage truth, stored index contents, and `index_region_status` remain unchanged.
+
 Retrieve and route flows now also surface coverage boundaries directly:
 
 - `index_readiness`
@@ -165,6 +167,8 @@ index_follow_up: semantic index --path src/worker
 
 - `added_file_count`
 - `changed_files`
+
+`changed_files` uses the same presentation filter as `indexed_path_hints`, so internal runtime paths do not crowd out the user-facing recovery summary. `added_file_count` still reflects the full indexed delta.
 
 `index_recovery_target_kind` tells you whether the recovery target was:
 
