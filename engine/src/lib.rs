@@ -280,6 +280,75 @@ pub struct ParsedFile {
     pub logic_clusters: Vec<LogicClusterRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustSymbolMetadataRecord {
+    pub symbol_name: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub kind: String,
+    #[serde(default)]
+    pub owner_name: Option<String>,
+    #[serde(default)]
+    pub trait_name: Option<String>,
+    #[serde(default)]
+    pub module_path: Option<String>,
+    #[serde(default)]
+    pub crate_name: Option<String>,
+    #[serde(default)]
+    pub crate_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustIndexedSymbolRecord {
+    pub symbol_id: i64,
+    pub name: String,
+    pub symbol_type: SymbolType,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub summary: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+    pub kind: String,
+    #[serde(default)]
+    pub owner_name: Option<String>,
+    #[serde(default)]
+    pub trait_name: Option<String>,
+    #[serde(default)]
+    pub module_path: Option<String>,
+    #[serde(default)]
+    pub crate_name: Option<String>,
+    #[serde(default)]
+    pub crate_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustImportRecord {
+    pub file: String,
+    pub path: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+    pub is_glob: bool,
+    pub start_line: u32,
+    pub end_line: u32,
+    #[serde(default)]
+    pub crate_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustModuleDeclRecord {
+    pub file: String,
+    pub module_name: String,
+    #[serde(default)]
+    pub resolved_path: Option<String>,
+    pub is_inline: bool,
+    pub start_line: u32,
+    pub end_line: u32,
+    #[serde(default)]
+    pub crate_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RetrievalRequest {
     pub operation: Operation,
@@ -364,7 +433,10 @@ pub enum Operation {
     GetTestGaps,
     GetDeploymentHistory,
     GetPerformanceStats,
+    SearchRustSymbol,
+    GetRustContext,
     GetProjectSummary,
+    GetArchitectureMap,
     GetSectionBrief,
     GetErrorContext,
     RecordError,

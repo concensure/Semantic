@@ -13,9 +13,16 @@ pub enum SupportedLanguage {
     Python,
     JavaScript,
     TypeScript,
+    #[cfg(feature = "rust-support")]
+    Rust,
 }
 
 impl SupportedLanguage {
+    #[cfg(feature = "rust-support")]
+    pub const ALL: [Self; 4] = [Self::Python, Self::JavaScript, Self::TypeScript, Self::Rust];
+    #[cfg(not(feature = "rust-support"))]
+    pub const ALL: [Self; 3] = [Self::Python, Self::JavaScript, Self::TypeScript];
+
     pub fn from_path(path: &str) -> Option<Self> {
         if path.ends_with(".py") {
             Some(Self::Python)
@@ -23,16 +30,27 @@ impl SupportedLanguage {
             Some(Self::JavaScript)
         } else if path.ends_with(".ts") || path.ends_with(".tsx") {
             Some(Self::TypeScript)
+        } else if path.ends_with(".rs") {
+            #[cfg(feature = "rust-support")]
+            {
+                Some(Self::Rust)
+            }
+            #[cfg(not(feature = "rust-support"))]
+            {
+                None
+            }
         } else {
             None
         }
     }
 
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Python => "python",
             Self::JavaScript => "javascript",
             Self::TypeScript => "typescript",
+            #[cfg(feature = "rust-support")]
+            Self::Rust => "rust",
         }
     }
 
@@ -41,6 +59,8 @@ impl SupportedLanguage {
             Self::Python => tree_sitter_python::language(),
             Self::JavaScript => tree_sitter_javascript::language(),
             Self::TypeScript => tree_sitter_typescript::language_typescript(),
+            #[cfg(feature = "rust-support")]
+            Self::Rust => tree_sitter_rust::language(),
         }
     }
 }
@@ -73,6 +93,10 @@ impl CodeParser {
     pub fn parse(&mut self, path: &str, content: &str) -> Result<ParsedFile> {
         let lang = SupportedLanguage::from_path(path)
             .ok_or_else(|| anyhow!("unsupported language for file: {path}"))?;
+        #[cfg(feature = "rust-support")]
+        if lang == SupportedLanguage::Rust {
+            return semantic_rust::parse_to_engine(path, content);
+        }
 
         self.parser
             .set_language(&lang.grammar())
@@ -572,6 +596,19 @@ fn build_import_path_candidates(language: SupportedLanguage, normalized: &str) -
                     format!("{trimmed}/index.tsx"),
                     format!("{trimmed}/index.js"),
                     format!("{trimmed}/index.jsx"),
+                    trimmed.to_string(),
+                ]
+            }
+        }
+        #[cfg(feature = "rust-support")]
+        SupportedLanguage::Rust => {
+            let has_known_extension = trimmed.ends_with(".rs");
+            if has_known_extension {
+                vec![trimmed.to_string()]
+            } else {
+                vec![
+                    format!("{trimmed}.rs"),
+                    format!("{trimmed}/mod.rs"),
                     trimmed.to_string(),
                 ]
             }
@@ -1147,5 +1184,17 @@ mod tests {
         assert!(kinds.contains(&LogicNodeType::Throw));
         assert!(kinds.contains(&LogicNodeType::Await));
         assert!(kinds.contains(&LogicNodeType::Return));
+    }
+
+    #[cfg(feature = "rust-support")]
+    #[test]
+    fn parses_rust_struct_and_impl_when_feature_enabled() {
+        let mut parser = CodeParser::new();
+        let src = "pub struct User;\nimpl User { pub fn new() -> Self { Self } }\n";
+        let parsed = parser.parse("src/user.rs", src).expect("parse rust");
+        assert_eq!(parsed.language, "rust");
+        assert!(parsed.symbols.iter().any(|s| s.name == "User"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "impl User"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "User::new"));
     }
 }

@@ -21,6 +21,49 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
 
+CREATE TABLE IF NOT EXISTS rust_symbol_metadata (
+    symbol_id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    owner_name TEXT,
+    trait_name TEXT,
+    module_path TEXT,
+    crate_name TEXT,
+    crate_root TEXT,
+    FOREIGN KEY(symbol_id) REFERENCES symbols(id)
+);
+CREATE INDEX IF NOT EXISTS idx_rust_meta_kind ON rust_symbol_metadata(kind);
+CREATE INDEX IF NOT EXISTS idx_rust_meta_owner ON rust_symbol_metadata(owner_name);
+CREATE INDEX IF NOT EXISTS idx_rust_meta_trait ON rust_symbol_metadata(trait_name);
+CREATE INDEX IF NOT EXISTS idx_rust_meta_module ON rust_symbol_metadata(module_path);
+CREATE INDEX IF NOT EXISTS idx_rust_meta_crate_name ON rust_symbol_metadata(crate_name);
+
+CREATE TABLE IF NOT EXISTS rust_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file TEXT NOT NULL,
+    path TEXT NOT NULL,
+    alias TEXT,
+    is_glob INTEGER NOT NULL DEFAULT 0,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    crate_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rust_import_file ON rust_imports(file);
+CREATE INDEX IF NOT EXISTS idx_rust_import_path ON rust_imports(path);
+CREATE INDEX IF NOT EXISTS idx_rust_import_alias ON rust_imports(alias);
+
+CREATE TABLE IF NOT EXISTS rust_module_decls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file TEXT NOT NULL,
+    module_name TEXT NOT NULL,
+    resolved_path TEXT,
+    is_inline INTEGER NOT NULL DEFAULT 0,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    crate_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rust_module_decl_file ON rust_module_decls(file);
+CREATE INDEX IF NOT EXISTS idx_rust_module_decl_name ON rust_module_decls(module_name);
+
 CREATE TABLE IF NOT EXISTS dependencies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id INTEGER NOT NULL DEFAULT 0,

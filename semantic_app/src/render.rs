@@ -571,7 +571,12 @@ fn parse_operation(raw: &str) -> Result<Operation> {
         "gettestgaps" | "get_test_gaps" => Operation::GetTestGaps,
         "getdeploymenthistory" | "get_deployment_history" => Operation::GetDeploymentHistory,
         "getperformancestats" | "get_performance_stats" => Operation::GetPerformanceStats,
+        "searchrustsymbol" | "search_rust_symbol" => Operation::SearchRustSymbol,
+        "getrustcontext" | "get_rust_context" | "rust_context" => Operation::GetRustContext,
         "getprojectsummary" | "get_project_summary" => Operation::GetProjectSummary,
+        "getarchitecturemap" | "get_architecture_map" | "architecture-map" | "architecture_map" => {
+            Operation::GetArchitectureMap
+        }
         "getsectionbrief" | "get_section_brief" => Operation::GetSectionBrief,
         "geterrorcontext" | "get_error_context" => Operation::GetErrorContext,
         "recorderror" | "record_error" => Operation::RecordError,
@@ -1039,6 +1044,32 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .collect()
             })
             .unwrap_or_default();
+        let supported_languages: Vec<String> = value
+            .get("supported_languages")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let repo_supported_source_file_count = value
+            .get("repo_supported_source_file_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default();
+        let repo_unsupported_source_file_count = value
+            .get("repo_unsupported_source_file_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default();
+        let repo_unsupported_source_path_hints: Vec<String> = value
+            .get("repo_unsupported_source_path_hints")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let watcher_running = value
             .get("watcher_running")
             .and_then(|v| v.as_bool())
@@ -1100,6 +1131,21 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                 if !roots.is_empty() {
                     out.push_str(&format!("\nworkspace_roots: {}", roots.join(" | ")));
                 }
+            }
+            if !supported_languages.is_empty() {
+                out.push_str(&format!(
+                    "\nsupported_languages: {}",
+                    supported_languages.join(" | ")
+                ));
+                out.push_str(&format!(
+                    "\nrepo_source_boundary: supported={repo_supported_source_file_count} unsupported={repo_unsupported_source_file_count}"
+                ));
+            }
+            if !repo_unsupported_source_path_hints.is_empty() {
+                out.push_str(&format!(
+                    "\nunsupported_source_path_hints: {}",
+                    repo_unsupported_source_path_hints.join(" | ")
+                ));
             }
         }
         return out;
@@ -1171,6 +1217,13 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                 {
                     out.push_str(&format!("\nverification_action: {action}"));
                 }
+                let has_unsupported_target_issue = verification
+                    .get("issues")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items.iter().any(|item| item.as_str() == Some("target_path_unsupported"))
+                    })
+                    .unwrap_or(false);
                 let target_symbol = verification
                     .get("target_symbol")
                     .and_then(|v| v.as_str())
@@ -1179,17 +1232,19 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     .get("top_context_file")
                     .and_then(|v| v.as_str())
                     .filter(|value| !value.is_empty());
-                match (target_symbol, top_context_file) {
-                    (Some(symbol), Some(file)) => {
-                        out.push_str(&format!("\nverification_scope: {symbol} @ {file}"));
+                if !has_unsupported_target_issue {
+                    match (target_symbol, top_context_file) {
+                        (Some(symbol), Some(file)) => {
+                            out.push_str(&format!("\nverification_scope: {symbol} @ {file}"));
+                        }
+                        (Some(symbol), None) => {
+                            out.push_str(&format!("\nverification_scope: {symbol}"));
+                        }
+                        (None, Some(file)) => {
+                            out.push_str(&format!("\nverification_scope: {file}"));
+                        }
+                        (None, None) => {}
                     }
-                    (Some(symbol), None) => {
-                        out.push_str(&format!("\nverification_scope: {symbol}"));
-                    }
-                    (None, Some(file)) => {
-                        out.push_str(&format!("\nverification_scope: {file}"));
-                    }
-                    (None, None) => {}
                 }
                 if let Some(index_coverage) = verification
                     .get("index_coverage")
@@ -1230,6 +1285,14 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                 {
                     out.push_str(&format!(
                         "\nindex_recovery_target_kind: {index_recovery_target_kind}"
+                    ));
+                }
+                if let Some(parser_target_support) = verification
+                    .get("parser_target_support")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!(
+                        "\nparser_target_support: {parser_target_support}"
                     ));
                 }
                 if let Some(command) = verification
@@ -1485,6 +1548,850 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
     }
     if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         if let Some(operation) = value.get("operation").and_then(|v| v.as_str()) {
+            if operation == "get_architecture_map" {
+                let mut out = format!("operation: {operation}");
+                if let Some(result) = value.get("result") {
+                    if let Some(stage) = result
+                        .get("orientation_stage")
+                        .and_then(|v| v.as_str())
+                    {
+                        out.push_str(&format!("\norientation_stage: {stage}"));
+                    }
+                    if let Some(summary) = result
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                    {
+                        out.push_str(&format!("\nsummary: {summary}"));
+                    }
+                    if let Some(priority_focus_mode) = result
+                        .get("priority_focus_mode")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_mode.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_mode: {priority_focus_mode}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_reason) = result
+                        .get("priority_focus_reason")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_reason.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_reason: {priority_focus_reason}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_trust) = result
+                        .get("priority_focus_trust")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_trust.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_trust: {priority_focus_trust}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_targets) = result
+                        .get("priority_focus_targets")
+                        .and_then(|v| v.as_array())
+                    {
+                        let targets = priority_focus_targets
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !targets.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_targets: {}",
+                                targets.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_target) = result
+                        .get("priority_focus_primary_target")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_target.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_target: {priority_focus_primary_target}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_path) = result
+                        .get("priority_focus_primary_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_path.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_path: {priority_focus_primary_path}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_importance) = result
+                        .get("priority_focus_primary_importance")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_importance.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_importance: {priority_focus_primary_importance}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_support_level) = result
+                        .get("priority_focus_primary_support_level")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_support_level.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_support_level: {priority_focus_primary_support_level}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_actionability) = result
+                        .get("priority_focus_primary_actionability")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_actionability.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_actionability: {priority_focus_primary_actionability}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_trust) = result
+                        .get("priority_focus_primary_trust")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_trust.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_trust: {priority_focus_primary_trust}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_rank) = result
+                        .get("priority_focus_primary_rank")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_rank: {priority_focus_primary_rank}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_score) = result
+                        .get("priority_focus_primary_score")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_score: {priority_focus_primary_score}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_score_components) = result
+                        .get("priority_focus_primary_score_components")
+                        .and_then(|v| v.as_object())
+                    {
+                        let importance = priority_focus_primary_score_components
+                            .get("importance")
+                            .and_then(|v| v.as_u64());
+                        let support = priority_focus_primary_score_components
+                            .get("support")
+                            .and_then(|v| v.as_u64());
+                        let signals = priority_focus_primary_score_components
+                            .get("signals")
+                            .and_then(|v| v.as_u64());
+                        if let (Some(importance), Some(support), Some(signals)) =
+                            (importance, support, signals)
+                        {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_score_components: importance={importance}, support={support}, signals={signals}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_score_gap_from_previous) = result
+                        .get("priority_focus_primary_score_gap_from_previous")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_score_gap_from_previous: {priority_focus_primary_score_gap_from_previous}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_score_gap_to_next) = result
+                        .get("priority_focus_primary_score_gap_to_next")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_score_gap_to_next: {priority_focus_primary_score_gap_to_next}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_score_separation) = result
+                        .get("priority_focus_primary_score_separation")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_score_separation.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_score_separation: {priority_focus_primary_score_separation}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_signals) = result
+                        .get("priority_focus_primary_signals")
+                        .and_then(|v| v.as_array())
+                    {
+                        let values = priority_focus_primary_signals
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !values.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_signals: {}",
+                                values.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_entry_points) = result
+                        .get("priority_focus_primary_entry_points")
+                        .and_then(|v| v.as_array())
+                    {
+                        let values = priority_focus_primary_entry_points
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !values.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_entry_points: {}",
+                                values.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_files) = result
+                        .get("priority_focus_primary_files")
+                        .and_then(|v| v.as_array())
+                    {
+                        let values = priority_focus_primary_files
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !values.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_files: {}",
+                                values.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_indexed_file_count) = result
+                        .get("priority_focus_primary_indexed_file_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_indexed_file_count: {priority_focus_primary_indexed_file_count}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_source_file_count) = result
+                        .get("priority_focus_primary_source_file_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_source_file_count: {priority_focus_primary_source_file_count}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_fan_out) = result
+                        .get("priority_focus_primary_fan_out")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_primary_fan_out: {priority_focus_primary_fan_out}"
+                        ));
+                    }
+                    if let Some(priority_focus_primary_open_first_path) = result
+                        .get("priority_focus_primary_open_first_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_open_first_path.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_open_first_path: {priority_focus_primary_open_first_path}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_next_step_operation) = result
+                        .get("priority_focus_primary_next_step_operation")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_next_step_operation.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_next_step_operation: {priority_focus_primary_next_step_operation}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_next_step_target_kind) = result
+                        .get("priority_focus_primary_next_step_target_kind")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_next_step_target_kind.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_next_step_target_kind: {priority_focus_primary_next_step_target_kind}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_next_step_target_path) = result
+                        .get("priority_focus_primary_next_step_target_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_next_step_target_path.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_next_step_target_path: {priority_focus_primary_next_step_target_path}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_primary_command) = result
+                        .get("priority_focus_primary_command")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_primary_command.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_primary_command: {priority_focus_primary_command}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_target) = result
+                        .get("priority_focus_secondary_target")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_target.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_target: {priority_focus_secondary_target}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_path) = result
+                        .get("priority_focus_secondary_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_path.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_path: {priority_focus_secondary_path}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_importance) = result
+                        .get("priority_focus_secondary_importance")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_importance.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_importance: {priority_focus_secondary_importance}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_support_level) = result
+                        .get("priority_focus_secondary_support_level")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_support_level.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_support_level: {priority_focus_secondary_support_level}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_actionability) = result
+                        .get("priority_focus_secondary_actionability")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_actionability.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_actionability: {priority_focus_secondary_actionability}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_trust) = result
+                        .get("priority_focus_secondary_trust")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_trust.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_trust: {priority_focus_secondary_trust}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_rank) = result
+                        .get("priority_focus_secondary_rank")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_rank: {priority_focus_secondary_rank}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_score) = result
+                        .get("priority_focus_secondary_score")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_score: {priority_focus_secondary_score}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_score_components) = result
+                        .get("priority_focus_secondary_score_components")
+                        .and_then(|v| v.as_object())
+                    {
+                        let importance = priority_focus_secondary_score_components
+                            .get("importance")
+                            .and_then(|v| v.as_u64());
+                        let support = priority_focus_secondary_score_components
+                            .get("support")
+                            .and_then(|v| v.as_u64());
+                        let signals = priority_focus_secondary_score_components
+                            .get("signals")
+                            .and_then(|v| v.as_u64());
+                        if let (Some(importance), Some(support), Some(signals)) =
+                            (importance, support, signals)
+                        {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_score_components: importance={importance}, support={support}, signals={signals}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_score_gap_from_previous) = result
+                        .get("priority_focus_secondary_score_gap_from_previous")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_score_gap_from_previous: {priority_focus_secondary_score_gap_from_previous}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_score_gap_to_next) = result
+                        .get("priority_focus_secondary_score_gap_to_next")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_score_gap_to_next: {priority_focus_secondary_score_gap_to_next}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_score_separation) = result
+                        .get("priority_focus_secondary_score_separation")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_score_separation.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_score_separation: {priority_focus_secondary_score_separation}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_signals) = result
+                        .get("priority_focus_secondary_signals")
+                        .and_then(|v| v.as_array())
+                    {
+                        let values = priority_focus_secondary_signals
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !values.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_signals: {}",
+                                values.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_entry_points) = result
+                        .get("priority_focus_secondary_entry_points")
+                        .and_then(|v| v.as_array())
+                    {
+                        let values = priority_focus_secondary_entry_points
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !values.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_entry_points: {}",
+                                values.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_files) = result
+                        .get("priority_focus_secondary_files")
+                        .and_then(|v| v.as_array())
+                    {
+                        let values = priority_focus_secondary_files
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>();
+                        if !values.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_files: {}",
+                                values.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_indexed_file_count) = result
+                        .get("priority_focus_secondary_indexed_file_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_indexed_file_count: {priority_focus_secondary_indexed_file_count}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_source_file_count) = result
+                        .get("priority_focus_secondary_source_file_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_source_file_count: {priority_focus_secondary_source_file_count}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_fan_out) = result
+                        .get("priority_focus_secondary_fan_out")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!(
+                            "\npriority_focus_secondary_fan_out: {priority_focus_secondary_fan_out}"
+                        ));
+                    }
+                    if let Some(priority_focus_secondary_open_first_path) = result
+                        .get("priority_focus_secondary_open_first_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_open_first_path.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_open_first_path: {priority_focus_secondary_open_first_path}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_next_step_operation) = result
+                        .get("priority_focus_secondary_next_step_operation")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_next_step_operation.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_next_step_operation: {priority_focus_secondary_next_step_operation}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_next_step_target_kind) = result
+                        .get("priority_focus_secondary_next_step_target_kind")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_next_step_target_kind.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_next_step_target_kind: {priority_focus_secondary_next_step_target_kind}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_next_step_target_path) = result
+                        .get("priority_focus_secondary_next_step_target_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_next_step_target_path.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_next_step_target_path: {priority_focus_secondary_next_step_target_path}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_secondary_command) = result
+                        .get("priority_focus_secondary_command")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !priority_focus_secondary_command.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_secondary_command: {priority_focus_secondary_command}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_commands) = result
+                        .get("priority_focus_commands")
+                        .and_then(|v| v.as_array())
+                    {
+                        let commands = if let Some(priority_focus_entries) = result
+                            .get("priority_focus_entries")
+                            .and_then(|v| v.as_array())
+                        {
+                            priority_focus_entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    let name = entry.get("name").and_then(|v| v.as_str())?;
+                                    let command =
+                                        entry.get("next_step_command").and_then(|v| v.as_str())?;
+                                    let support_level = entry
+                                        .get("support_level")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let actionability = entry
+                                        .get("actionability")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let base = format!("{name} -> {command}");
+                                    if let Some(trust) = format_architecture_priority_trust(
+                                        support_level,
+                                        actionability,
+                                    ) {
+                                        Some(format!("{base} [{trust}]"))
+                                    } else {
+                                        Some(base)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            priority_focus_commands
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .map(|item| item.to_string())
+                                .collect::<Vec<_>>()
+                        };
+                        if !commands.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_commands: {}",
+                                commands.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(priority_focus_follow_up_operations) = result
+                        .get("priority_focus_follow_up_operations")
+                        .and_then(|v| v.as_array())
+                    {
+                        let summary = priority_focus_follow_up_operations
+                            .iter()
+                            .filter_map(|item| {
+                                let target = item.get("target").and_then(|v| v.as_str())?;
+                                let operation = item.get("operation").and_then(|v| v.as_str())?;
+                                let target_path =
+                                    item.get("target_path").and_then(|v| v.as_str()).unwrap_or("");
+                                let trust = item.get("trust").and_then(|v| v.as_str()).unwrap_or("");
+                                let mut base = if target_path.is_empty() {
+                                    format!("{target} -> {operation}")
+                                } else {
+                                    format!("{target} -> {operation} {target_path}")
+                                };
+                                if !trust.is_empty() && trust != "semantic_precise" {
+                                    base.push_str(&format!(" [{trust}]"));
+                                }
+                                Some(base)
+                            })
+                            .collect::<Vec<_>>();
+                        if !summary.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_focus_follow_up_operations: {}",
+                                summary.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(high_priority_modules) = result
+                        .get("high_priority_modules")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !high_priority_modules.is_empty() {
+                            out.push_str(&format!(
+                                "\nhigh_priority_modules: {high_priority_modules}"
+                            ));
+                        }
+                    }
+                    if let Some(priority_modules) = result
+                        .get("priority_modules")
+                        .and_then(|v| v.as_array())
+                    {
+                        let summary = priority_modules
+                            .iter()
+                            .filter_map(|module| {
+                                let name = module.get("name").and_then(|v| v.as_str())?;
+                                let importance =
+                                    module.get("importance").and_then(|v| v.as_str())?;
+                                let support_level = module
+                                    .get("support_level")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let actionability = module
+                                    .get("actionability")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let trust = format_architecture_priority_trust(
+                                    support_level,
+                                    actionability,
+                                );
+                                let label = if let Some(trust) = trust {
+                                    format!("{name} [{importance}, {trust}]")
+                                } else {
+                                    format!("{name} [{importance}]")
+                                };
+                                Some(label)
+                            })
+                            .collect::<Vec<_>>();
+                        if !summary.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_modules: {}",
+                                summary.join(" | ")
+                            ));
+                        }
+                        let open_paths = priority_modules
+                            .iter()
+                            .filter_map(|module| {
+                                let name = module.get("name").and_then(|v| v.as_str())?;
+                                let path = module.get("open_first_path").and_then(|v| v.as_str())?;
+                                let support_level = module
+                                    .get("support_level")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let actionability = module
+                                    .get("actionability")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let label = if let Some(trust) =
+                                    format_architecture_priority_trust(
+                                        support_level,
+                                        actionability,
+                                    )
+                                {
+                                    format!("{name} -> {path} [{trust}]")
+                                } else {
+                                    format!("{name} -> {path}")
+                                };
+                                Some(label)
+                            })
+                            .collect::<Vec<_>>();
+                        if !open_paths.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_open_first_paths: {}",
+                                open_paths.join(" | ")
+                            ));
+                        }
+                        let next_steps = priority_modules
+                            .iter()
+                            .filter_map(|module| {
+                                let name = module.get("name").and_then(|v| v.as_str())?;
+                                let op = module
+                                    .get("next_step_operation")
+                                    .and_then(|v| v.as_str())?;
+                                let target = module
+                                    .get("next_step_target_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let support_level = module
+                                    .get("support_level")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let actionability = module
+                                    .get("actionability")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let trust = format_architecture_priority_trust(
+                                    support_level,
+                                    actionability,
+                                );
+                                let base = if target.is_empty() {
+                                    format!("{name} -> {op}")
+                                } else {
+                                    format!("{name} -> {op} {target}")
+                                };
+                                if let Some(trust) = trust {
+                                    Some(format!("{base} [{trust}]"))
+                                } else {
+                                    Some(base)
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        if !next_steps.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_next_steps: {}",
+                                next_steps.join(" | ")
+                            ));
+                        }
+                        let next_commands = priority_modules
+                            .iter()
+                            .filter_map(|module| {
+                                let name = module.get("name").and_then(|v| v.as_str())?;
+                                let command = module
+                                    .get("next_step_command")
+                                    .and_then(|v| v.as_str())?;
+                                Some(format!("{name} -> {command}"))
+                            })
+                            .collect::<Vec<_>>();
+                        if !next_commands.is_empty() {
+                            out.push_str(&format!(
+                                "\npriority_next_step_commands: {}",
+                                next_commands.join(" | ")
+                            ));
+                        }
+                    }
+                    if let Some(discovered) = result
+                        .get("discovered_module_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!("\ndiscovered_module_count: {discovered}"));
+                    }
+                    if let Some(visible) = result
+                        .get("visible_module_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        out.push_str(&format!("\nvisible_module_count: {visible}"));
+                    }
+                    if let Some(grouped_hidden) = result
+                        .get("grouped_hidden_module_count")
+                        .and_then(|v| v.as_u64())
+                    {
+                        if grouped_hidden > 0 {
+                            out.push_str(&format!(
+                                "\ngrouped_hidden_module_count: {grouped_hidden}"
+                            ));
+                        }
+                    }
+                    if let Some(modules) = result.get("modules").and_then(|v| v.as_array()) {
+                        let visible_modules = architecture_modules_for_text_output(modules, 8);
+                        for module in &visible_modules {
+                            let name = module.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                            let importance = module
+                                .get("importance")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            out.push_str(&format!("\nmodule: {name} [{importance}]"));
+                            if let Some(path) = module.get("path").and_then(|v| v.as_str()) {
+                                out.push_str(&format!("\npath: {path}"));
+                            }
+                            if let Some(support_level) =
+                                module.get("support_level").and_then(|v| v.as_str())
+                            {
+                                out.push_str(&format!("\nsupport_level: {support_level}"));
+                            }
+                            if let Some(signals) = module.get("signals").and_then(|v| v.as_array()) {
+                                let values = signals
+                                    .iter()
+                                    .filter_map(|item| item.as_str())
+                                    .collect::<Vec<_>>();
+                                if !values.is_empty() {
+                                    out.push_str(&format!("\nsignals: {}", values.join(" | ")));
+                                }
+                            }
+                            if let Some(entry_points) =
+                                module.get("entry_points").and_then(|v| v.as_array())
+                            {
+                                let values = entry_points
+                                    .iter()
+                                    .filter_map(|item| item.as_str())
+                                    .collect::<Vec<_>>();
+                                if !values.is_empty() {
+                                    out.push_str(&format!(
+                                        "\nentry_points: {}",
+                                        values.join(" | ")
+                                    ));
+                                }
+                            }
+                            if let Some(files) = module.get("files").and_then(|v| v.as_array()) {
+                                let values = files
+                                    .iter()
+                                    .filter_map(|item| item.as_str())
+                                    .collect::<Vec<_>>();
+                                if !values.is_empty() {
+                                    out.push_str(&format!("\nfiles: {}", values.join(" | ")));
+                                }
+                            }
+                            if let Some(grouped_count) =
+                                module.get("grouped_module_count").and_then(|v| v.as_u64())
+                            {
+                                out.push_str(&format!(
+                                    "\ngrouped_module_count: {grouped_count}"
+                                ));
+                            }
+                        }
+                        let omitted = modules.len().saturating_sub(visible_modules.len());
+                        if omitted > 0 {
+                            out.push_str(&format!("\nomitted_module_count: {omitted}"));
+                        }
+                    }
+                }
+                return out;
+            }
             let mut out = format!("operation: {operation}");
             if value
                 .get("auto_index_applied")
@@ -1547,6 +2454,27 @@ fn text_output(value: &serde_json::Value, verbose: bool) -> String {
                     out.push_str(&format!(
                         "\nindex_recovery_target_kind: {index_recovery_target_kind}"
                     ));
+                }
+                if let Some(parser_target_support) = result
+                    .get("parser_target_support")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push_str(&format!(
+                        "\nparser_target_support: {parser_target_support}"
+                    ));
+                }
+                if let Some(index_coverage) = result
+                    .get("index_coverage")
+                    .and_then(|v| v.as_str())
+                {
+                    if let Some(target) = result
+                        .get("index_coverage_target")
+                        .and_then(|v| v.as_str())
+                    {
+                        out.push_str(&format!("\nindex_coverage: {index_coverage} @ {target}"));
+                    } else {
+                        out.push_str(&format!("\nindex_coverage: {index_coverage}"));
+                    }
                 }
                 if let Some(command) = result
                     .get("suggested_index_command")
@@ -1849,6 +2777,10 @@ mod tests {
             "index_region_status": "fully_indexed",
             "indexed_path_hints": ["src/auth", "src/shared"],
             "indexed_region_hints": ["."],
+            "supported_languages": ["python", "javascript", "typescript"],
+            "repo_supported_source_file_count": 128,
+            "repo_unsupported_source_file_count": 0,
+            "repo_unsupported_source_path_hints": [],
             "watcher_running": false,
             "bootstrap_index_action": "reuse_existing",
             "indexing_mode": "full_with_default_excludes",
@@ -1887,6 +2819,13 @@ mod tests {
             "index_region_status": "targeted_partial",
             "indexed_path_hints": ["packages/api/src", "packages/worker/src"],
             "indexed_region_hints": ["packages/api/src"],
+            "supported_languages": ["python", "javascript", "typescript"],
+            "repo_supported_source_file_count": 2,
+            "repo_unsupported_source_file_count": 2,
+            "repo_unsupported_source_path_hints": [
+                "src/main.rs",
+                "scripts/build.sh"
+            ],
             "watcher_running": true,
             "bootstrap_index_action": "bootstrap_full",
             "indexing_mode": "full_with_default_excludes",
@@ -1906,6 +2845,9 @@ mod tests {
         assert!(rendered.contains("workspace_roots: C:/repo/packages/api | C:/repo/packages/worker"));
         assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("indexed_region_hints: packages/api/src"));
+        assert!(rendered.contains("supported_languages: python | javascript | typescript"));
+        assert!(rendered.contains("repo_source_boundary: supported=2 unsupported=2"));
+        assert!(rendered.contains("unsupported_source_path_hints: src/main.rs | scripts/build.sh"));
     }
 
     #[test]
@@ -2413,6 +3355,7 @@ mod tests {
                 "index_readiness": "partial_index_missing_target",
                 "index_recovery_mode": "suggest_only",
                 "index_recovery_target_kind": "directory",
+                "parser_target_support": "unknown",
                 "recommended_action": "review returned spans",
                 "index_coverage": "unindexed_target",
                 "index_coverage_target": "src/worker",
@@ -2426,6 +3369,7 @@ mod tests {
         assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("index_recovery_mode: suggest_only"));
         assert!(rendered.contains("index_recovery_target_kind: directory"));
+        assert!(rendered.contains("parser_target_support: unknown"));
         assert!(rendered.contains("index_coverage: unindexed_target @ src/worker"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
         assert!(rendered.contains("verification_issue: target_path_not_indexed"));
@@ -2441,6 +3385,7 @@ mod tests {
                 "index_readiness": "partial_index_missing_target",
                 "index_recovery_mode": "suggest_only",
                 "index_recovery_target_kind": "directory",
+                "parser_target_support": "unknown",
                 "summary_text": "src/worker: 4 files",
                 "index_coverage": "unindexed_target",
                 "index_coverage_target": "src/worker",
@@ -2452,7 +3397,378 @@ mod tests {
         assert!(rendered.contains("index_region_status: targeted_partial"));
         assert!(rendered.contains("index_recovery_mode: suggest_only"));
         assert!(rendered.contains("index_recovery_target_kind: directory"));
+        assert!(rendered.contains("parser_target_support: unknown"));
         assert!(rendered.contains("index_follow_up: semantic index --path src/worker"));
+    }
+
+    #[test]
+    fn route_text_output_surfaces_unsupported_target_coverage() {
+        let value = serde_json::json!({
+            "intent": "understand",
+            "selected_tool": "search_semantic_symbol",
+            "verification": {
+                "status": "needs_review",
+                "index_region_status": "targeted_partial",
+                "index_readiness": "unsupported_target",
+                "index_recovery_mode": "unsupported_target",
+                "index_recovery_target_kind": "file",
+                "parser_target_support": "unsupported",
+                "recommended_action": "requested file is outside current parser coverage",
+                "recommended_cli_follow_up": null,
+                "target_symbol": "buildApiTheme",
+                "top_context_file": "src/client/apiClient.ts",
+                "index_coverage": "unsupported_target",
+                "index_coverage_target": "src/main.rs",
+                "issues": ["target_path_unsupported"]
+            },
+            "result": {}
+        });
+        let rendered = text_output(&value, false);
+        assert!(rendered.contains("index_readiness: unsupported_target"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
+        assert!(rendered.contains("index_recovery_mode: unsupported_target"));
+        assert!(rendered.contains("index_recovery_target_kind: file"));
+        assert!(rendered.contains("parser_target_support: unsupported"));
+        assert!(rendered.contains("verification_action: requested file is outside current parser coverage"));
+        assert!(rendered.contains("index_coverage: unsupported_target @ src/main.rs"));
+        assert!(rendered.contains("verification_issue: target_path_unsupported"));
+        assert!(!rendered.contains("verification_scope:"));
+        assert!(!rendered.contains("verification_follow_up:"));
+        assert!(!rendered.contains("index_follow_up:"));
+    }
+
+    #[test]
+    fn retrieve_text_output_surfaces_unsupported_target_coverage() {
+        let value = serde_json::json!({
+            "ok": true,
+            "operation": "search_symbol",
+            "result": {
+                "index_region_status": "targeted_partial",
+                "index_readiness": "unsupported_target",
+                "index_recovery_mode": "unsupported_target",
+                "index_recovery_target_kind": "file",
+                "parser_target_support": "unsupported",
+                "index_coverage": "unsupported_target",
+                "index_coverage_target": "src/main.rs"
+            }
+        });
+        let rendered = text_output(&value, false);
+        assert!(rendered.contains("index_readiness: unsupported_target"));
+        assert!(rendered.contains("index_region_status: targeted_partial"));
+        assert!(rendered.contains("index_recovery_mode: unsupported_target"));
+        assert!(rendered.contains("index_recovery_target_kind: file"));
+        assert!(rendered.contains("parser_target_support: unsupported"));
+        assert!(rendered.contains("index_coverage: unsupported_target @ src/main.rs"));
+        assert!(!rendered.contains("index_follow_up:"));
+    }
+
+    #[test]
+    fn architecture_map_text_output_surfaces_modules_and_signals() {
+        let value = serde_json::json!({
+            "ok": true,
+            "operation": "get_architecture_map",
+            "result": {
+                "orientation_stage": "indexed_modules",
+                "summary": "Orientation map for 2 indexed module(s)",
+                "priority_focus_mode": "single_focus",
+                "priority_focus_reason": "auth has a clear lead over the next candidate (gap=10)",
+                "priority_focus_trust": "semantic_precise",
+                "priority_focus_targets": ["auth"],
+                "priority_focus_primary_target": "auth",
+                "priority_focus_primary_path": "src/auth",
+                "priority_focus_primary_importance": "high",
+                "priority_focus_primary_support_level": "indexed",
+                "priority_focus_primary_actionability": "semantic_precise",
+                "priority_focus_primary_trust": "semantic_precise",
+                "priority_focus_primary_rank": 1,
+                "priority_focus_primary_score": 332,
+                "priority_focus_primary_score_components": {"importance": 300, "support": 30, "signals": 2},
+                "priority_focus_primary_score_gap_to_next": 10,
+                "priority_focus_primary_score_separation": "clear_lead",
+                "priority_focus_primary_signals": ["security", "entry_points"],
+                "priority_focus_primary_entry_points": ["login"],
+                "priority_focus_primary_files": ["login.ts", "jwt.ts"],
+                "priority_focus_primary_indexed_file_count": 2,
+                "priority_focus_primary_source_file_count": 2,
+                "priority_focus_primary_fan_out": 0,
+                "priority_focus_primary_open_first_path": "src/auth/login.ts",
+                "priority_focus_primary_next_step_operation": "get_file_brief",
+                "priority_focus_primary_next_step_target_kind": "file",
+                "priority_focus_primary_next_step_target_path": "src/auth/login.ts",
+                "priority_focus_primary_command": "semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text",
+                "priority_focus_entries": [
+                    {"name": "auth", "support_level": "indexed", "actionability": "semantic_precise", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text"}
+                ],
+                "priority_focus_commands": ["auth -> semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text"],
+                "priority_focus_follow_up_operations": [
+                    {"target": "auth", "operation": "get_file_brief", "target_path": "src/auth/login.ts", "trust": "semantic_precise"}
+                ],
+                "high_priority_modules": "auth [high] | billing [medium, unsupported_source, orientation_only]",
+                "priority_modules": [
+                    {"name": "auth", "path": "src/auth", "importance": "high", "support_level": "indexed", "actionability": "semantic_precise", "open_first_path": "src/auth/login.ts", "next_step_operation": "get_file_brief", "next_step_target_path": "src/auth/login.ts", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text"},
+                    {"name": "billing", "path": "src/billing", "importance": "medium", "support_level": "unsupported_source", "actionability": "orientation_only", "open_first_path": "src/billing/invoice.ts", "next_step_operation": "get_file_brief", "next_step_target_path": "src/billing/invoice.ts", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/billing/invoice.ts\" --output text"}
+                ],
+                "discovered_module_count": 3,
+                "visible_module_count": 3,
+                "modules": [
+                    {
+                        "name": "auth",
+                        "path": "src/auth",
+                        "support_level": "indexed",
+                        "importance": "high",
+                        "signals": ["security", "entry_points"],
+                        "entry_points": ["login"],
+                        "files": ["login.ts", "jwt.ts"]
+                    },
+                    {
+                        "name": "billing",
+                        "path": "src/billing",
+                        "support_level": "unsupported_source",
+                        "importance": "medium",
+                        "signals": ["payments", "outside_parser_support"],
+                        "entry_points": ["chargeInvoice"],
+                        "files": ["invoice.ts"]
+                    },
+                    {
+                        "name": "other_unsupported_sources",
+                        "path": "(grouped)",
+                        "support_level": "unsupported_source_group",
+                        "importance": "medium",
+                        "signals": ["outside_parser_support", "grouped_modules"],
+                        "entry_points": [],
+                        "files": ["api", "engine"],
+                        "grouped_module_count": 2
+                    }
+                ]
+            }
+        });
+        let rendered = text_output(&value, false);
+        assert!(rendered.contains("operation: get_architecture_map"));
+        assert!(rendered.contains("orientation_stage: indexed_modules"));
+        assert!(rendered.contains("priority_focus_mode: single_focus"));
+        assert!(rendered.contains("priority_focus_reason: auth has a clear lead over the next candidate (gap=10)"));
+        assert!(rendered.contains("priority_focus_trust: semantic_precise"));
+        assert!(rendered.contains("priority_focus_targets: auth"));
+        assert!(rendered.contains("priority_focus_primary_target: auth"));
+        assert!(rendered.contains("priority_focus_primary_path: src/auth"));
+        assert!(rendered.contains("priority_focus_primary_importance: high"));
+        assert!(rendered.contains("priority_focus_primary_support_level: indexed"));
+        assert!(rendered.contains("priority_focus_primary_actionability: semantic_precise"));
+        assert!(rendered.contains("priority_focus_primary_trust: semantic_precise"));
+        assert!(rendered.contains("priority_focus_primary_rank: 1"));
+        assert!(rendered.contains("priority_focus_primary_score: 332"));
+        assert!(rendered.contains("priority_focus_primary_score_components: importance=300, support=30, signals=2"));
+        assert!(rendered.contains("priority_focus_primary_score_gap_to_next: 10"));
+        assert!(rendered.contains("priority_focus_primary_score_separation: clear_lead"));
+        assert!(rendered.contains("priority_focus_primary_signals: security | entry_points"));
+        assert!(rendered.contains("priority_focus_primary_entry_points: login"));
+        assert!(rendered.contains("priority_focus_primary_files: login.ts | jwt.ts"));
+        assert!(rendered.contains("priority_focus_primary_indexed_file_count: 2"));
+        assert!(rendered.contains("priority_focus_primary_source_file_count: 2"));
+        assert!(rendered.contains("priority_focus_primary_fan_out: 0"));
+        assert!(rendered.contains("priority_focus_primary_open_first_path: src/auth/login.ts"));
+        assert!(rendered.contains("priority_focus_primary_next_step_operation: get_file_brief"));
+        assert!(rendered.contains("priority_focus_primary_next_step_target_kind: file"));
+        assert!(rendered.contains("priority_focus_primary_next_step_target_path: src/auth/login.ts"));
+        assert!(rendered.contains("priority_focus_primary_command: semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text"));
+        assert!(rendered.contains("priority_focus_commands: auth -> semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text"));
+        assert!(rendered.contains("priority_focus_follow_up_operations: auth -> get_file_brief src/auth/login.ts"));
+        assert!(rendered.contains(
+            "high_priority_modules: auth [high] | billing [medium, unsupported_source, orientation_only]"
+        ));
+        assert!(rendered.contains(
+            "priority_modules: auth [high] | billing [medium, unsupported_source, orientation_only]"
+        ));
+        assert!(rendered.contains(
+            "priority_open_first_paths: auth -> src/auth/login.ts | billing -> src/billing/invoice.ts [unsupported_source, orientation_only]"
+        ));
+        assert!(rendered.contains(
+            "priority_next_steps: auth -> get_file_brief src/auth/login.ts | billing -> get_file_brief src/billing/invoice.ts [unsupported_source, orientation_only]"
+        ));
+        assert!(rendered.contains(
+            "priority_next_step_commands: auth -> semantic --repo . retrieve --op get_file_brief --file \"src/auth/login.ts\" --output text | billing -> semantic --repo . retrieve --op get_file_brief --file \"src/billing/invoice.ts\" --output text"
+        ));
+        assert!(rendered.contains("module: auth [high]"));
+        assert!(rendered.contains("support_level: indexed"));
+        assert!(rendered.contains("signals: security | entry_points"));
+        assert!(rendered.contains("entry_points: login"));
+        assert!(rendered.contains("files: login.ts | jwt.ts"));
+        assert!(rendered.contains("support_level: unsupported_source"));
+        assert!(rendered.contains("support_level: unsupported_source_group"));
+        assert!(rendered.contains("grouped_module_count: 2"));
+    }
+
+    #[test]
+    fn architecture_map_text_output_keeps_grouped_module_visible_when_truncated() {
+        let modules = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "name": format!("module_{index}"),
+                    "path": format!("src/module_{index}"),
+                    "support_level": "indexed",
+                    "importance": "medium",
+                    "signals": [],
+                    "entry_points": [],
+                    "files": [format!("module_{index}.ts")]
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut modules = modules;
+        modules.push(serde_json::json!({
+            "name": "other_unsupported_sources",
+            "path": "(grouped)",
+            "support_level": "unsupported_source_group",
+            "importance": "medium",
+            "signals": ["outside_parser_support", "grouped_modules"],
+            "entry_points": [],
+            "files": ["api", "engine"],
+            "grouped_module_count": 12
+        }));
+        let value = serde_json::json!({
+            "ok": true,
+            "operation": "get_architecture_map",
+            "result": {
+                "orientation_stage": "indexed_modules",
+                "summary": "Orientation map for 9 module(s)",
+                "priority_focus_mode": "compare_top_two",
+                "priority_focus_reason": "module_0 and module_1 are close enough to compare first (gap=1)",
+                "priority_focus_trust": "mixed",
+                "priority_focus_targets": ["module_0", "module_1"],
+                "priority_focus_primary_target": "module_0",
+                "priority_focus_primary_path": "src/module_0",
+                "priority_focus_primary_importance": "medium",
+                "priority_focus_primary_support_level": "indexed",
+                "priority_focus_primary_actionability": "semantic_precise",
+                "priority_focus_primary_trust": "semantic_precise",
+                "priority_focus_primary_rank": 1,
+                "priority_focus_primary_score": 220,
+                "priority_focus_primary_score_components": {"importance": 200, "support": 20, "signals": 0},
+                "priority_focus_primary_score_gap_to_next": 1,
+                "priority_focus_primary_score_separation": "close_cluster",
+                "priority_focus_primary_signals": [],
+                "priority_focus_primary_entry_points": [],
+                "priority_focus_primary_files": ["module_0.ts"],
+                "priority_focus_primary_indexed_file_count": 1,
+                "priority_focus_primary_source_file_count": 1,
+                "priority_focus_primary_fan_out": 0,
+                "priority_focus_primary_open_first_path": "src/module_0/module_0.ts",
+                "priority_focus_primary_next_step_operation": "get_file_brief",
+                "priority_focus_primary_next_step_target_kind": "file",
+                "priority_focus_primary_next_step_target_path": "src/module_0/module_0.ts",
+                "priority_focus_primary_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text",
+                "priority_focus_secondary_target": "module_1",
+                "priority_focus_secondary_path": "src/module_1",
+                "priority_focus_secondary_importance": "medium",
+                "priority_focus_secondary_support_level": "unsupported_source",
+                "priority_focus_secondary_actionability": "orientation_only",
+                "priority_focus_secondary_trust": "orientation_only",
+                "priority_focus_secondary_rank": 2,
+                "priority_focus_secondary_score": 219,
+                "priority_focus_secondary_score_components": {"importance": 200, "support": 19, "signals": 0},
+                "priority_focus_secondary_score_gap_from_previous": 1,
+                "priority_focus_secondary_score_separation": "close_cluster",
+                "priority_focus_secondary_files": ["module_1.ts"],
+                "priority_focus_secondary_indexed_file_count": 0,
+                "priority_focus_secondary_source_file_count": 1,
+                "priority_focus_secondary_fan_out": 0,
+                "priority_focus_secondary_open_first_path": "src/module_1/module_1.ts",
+                "priority_focus_secondary_next_step_operation": "get_file_brief",
+                "priority_focus_secondary_next_step_target_kind": "file",
+                "priority_focus_secondary_next_step_target_path": "src/module_1/module_1.ts",
+                "priority_focus_secondary_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text",
+                "priority_focus_entries": [
+                    {"name": "module_0", "support_level": "indexed", "actionability": "semantic_precise", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text"},
+                    {"name": "module_1", "support_level": "unsupported_source", "actionability": "orientation_only", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text"}
+                ],
+                "priority_focus_follow_up_operations": [
+                    {"target": "module_0", "operation": "get_file_brief", "target_path": "src/module_0/module_0.ts", "trust": "semantic_precise"},
+                    {"target": "module_1", "operation": "get_file_brief", "target_path": "src/module_1/module_1.ts", "trust": "orientation_only"}
+                ],
+                "priority_focus_commands": [
+                    "module_0 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text",
+                    "module_1 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text"
+                ],
+                "high_priority_modules": "module_0 [medium] | module_1 [medium] | module_2 [medium]",
+                "priority_modules": [
+                    {"name": "module_0", "path": "src/module_0", "importance": "medium", "support_level": "indexed", "actionability": "semantic_precise", "open_first_path": "src/module_0/module_0.ts", "next_step_operation": "get_file_brief", "next_step_target_path": "src/module_0/module_0.ts", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text"},
+                    {"name": "module_1", "path": "src/module_1", "importance": "medium", "support_level": "indexed", "actionability": "semantic_precise", "open_first_path": "src/module_1/module_1.ts", "next_step_operation": "get_file_brief", "next_step_target_path": "src/module_1/module_1.ts", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text"},
+                    {"name": "module_2", "path": "src/module_2", "importance": "medium", "support_level": "indexed", "actionability": "semantic_precise", "open_first_path": "src/module_2/module_2.ts", "next_step_operation": "get_file_brief", "next_step_target_path": "src/module_2/module_2.ts", "next_step_command": "semantic --repo . retrieve --op get_file_brief --file \"src/module_2/module_2.ts\" --output text"}
+                ],
+                "discovered_module_count": 9,
+                "visible_module_count": 8,
+                "grouped_hidden_module_count": 12,
+                "modules": modules
+            }
+        });
+        let rendered = text_output(&value, false);
+        assert!(rendered.contains(
+            "high_priority_modules: module_0 [medium] | module_1 [medium] | module_2 [medium]"
+        ));
+        assert!(rendered.contains("priority_focus_mode: compare_top_two"));
+        assert!(rendered.contains("priority_focus_reason: module_0 and module_1 are close enough to compare first (gap=1)"));
+        assert!(rendered.contains("priority_focus_trust: mixed"));
+        assert!(rendered.contains("priority_focus_targets: module_0 | module_1"));
+        assert!(rendered.contains("priority_focus_primary_target: module_0"));
+        assert!(rendered.contains("priority_focus_primary_path: src/module_0"));
+        assert!(rendered.contains("priority_focus_primary_importance: medium"));
+        assert!(rendered.contains("priority_focus_primary_support_level: indexed"));
+        assert!(rendered.contains("priority_focus_primary_actionability: semantic_precise"));
+        assert!(rendered.contains("priority_focus_primary_trust: semantic_precise"));
+        assert!(rendered.contains("priority_focus_primary_rank: 1"));
+        assert!(rendered.contains("priority_focus_primary_score: 220"));
+        assert!(rendered.contains("priority_focus_primary_score_components: importance=200, support=20, signals=0"));
+        assert!(rendered.contains("priority_focus_primary_score_gap_to_next: 1"));
+        assert!(rendered.contains("priority_focus_primary_score_separation: close_cluster"));
+        assert!(rendered.contains("priority_focus_primary_files: module_0.ts"));
+        assert!(rendered.contains("priority_focus_primary_indexed_file_count: 1"));
+        assert!(rendered.contains("priority_focus_primary_source_file_count: 1"));
+        assert!(rendered.contains("priority_focus_primary_fan_out: 0"));
+        assert!(rendered.contains("priority_focus_primary_open_first_path: src/module_0/module_0.ts"));
+        assert!(rendered.contains("priority_focus_primary_next_step_operation: get_file_brief"));
+        assert!(rendered.contains("priority_focus_primary_next_step_target_kind: file"));
+        assert!(rendered.contains("priority_focus_primary_next_step_target_path: src/module_0/module_0.ts"));
+        assert!(rendered.contains("priority_focus_primary_command: semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text"));
+        assert!(rendered.contains("priority_focus_secondary_target: module_1"));
+        assert!(rendered.contains("priority_focus_secondary_path: src/module_1"));
+        assert!(rendered.contains("priority_focus_secondary_importance: medium"));
+        assert!(rendered.contains("priority_focus_secondary_support_level: unsupported_source"));
+        assert!(rendered.contains("priority_focus_secondary_actionability: orientation_only"));
+        assert!(rendered.contains("priority_focus_secondary_trust: orientation_only"));
+        assert!(rendered.contains("priority_focus_secondary_rank: 2"));
+        assert!(rendered.contains("priority_focus_secondary_score: 219"));
+        assert!(rendered.contains("priority_focus_secondary_score_components: importance=200, support=19, signals=0"));
+        assert!(rendered.contains("priority_focus_secondary_score_gap_from_previous: 1"));
+        assert!(rendered.contains("priority_focus_secondary_score_separation: close_cluster"));
+        assert!(rendered.contains("priority_focus_secondary_files: module_1.ts"));
+        assert!(rendered.contains("priority_focus_secondary_indexed_file_count: 0"));
+        assert!(rendered.contains("priority_focus_secondary_source_file_count: 1"));
+        assert!(rendered.contains("priority_focus_secondary_fan_out: 0"));
+        assert!(rendered.contains("priority_focus_secondary_open_first_path: src/module_1/module_1.ts"));
+        assert!(rendered.contains("priority_focus_secondary_next_step_operation: get_file_brief"));
+        assert!(rendered.contains("priority_focus_secondary_next_step_target_kind: file"));
+        assert!(rendered.contains("priority_focus_secondary_next_step_target_path: src/module_1/module_1.ts"));
+        assert!(rendered.contains("priority_focus_secondary_command: semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text"));
+        assert!(rendered.contains("priority_focus_follow_up_operations: module_0 -> get_file_brief src/module_0/module_0.ts | module_1 -> get_file_brief src/module_1/module_1.ts [orientation_only]"));
+        assert!(rendered.contains("priority_focus_commands: module_0 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text | module_1 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text [unsupported_source, orientation_only]"));
+        assert!(rendered.contains(
+            "priority_modules: module_0 [medium] | module_1 [medium] | module_2 [medium]"
+        ));
+        assert!(rendered.contains(
+            "priority_open_first_paths: module_0 -> src/module_0/module_0.ts | module_1 -> src/module_1/module_1.ts | module_2 -> src/module_2/module_2.ts"
+        ));
+        assert!(rendered.contains(
+            "priority_next_steps: module_0 -> get_file_brief src/module_0/module_0.ts | module_1 -> get_file_brief src/module_1/module_1.ts | module_2 -> get_file_brief src/module_2/module_2.ts"
+        ));
+        assert!(rendered.contains(
+            "priority_next_step_commands: module_0 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_0/module_0.ts\" --output text | module_1 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_1/module_1.ts\" --output text | module_2 -> semantic --repo . retrieve --op get_file_brief --file \"src/module_2/module_2.ts\" --output text"
+        ));
+        assert!(rendered.contains("discovered_module_count: 9"));
+        assert!(rendered.contains("visible_module_count: 8"));
+        assert!(rendered.contains("grouped_hidden_module_count: 12"));
+        assert!(rendered.contains("module: other_unsupported_sources [medium]"));
+        assert!(rendered.contains("grouped_module_count: 12"));
+        assert!(rendered.contains("omitted_module_count: 1"));
+        assert!(!rendered.contains("module: module_7 [medium]"));
     }
 
     #[test]
@@ -2840,4 +4156,40 @@ fn summarize_value(value: &serde_json::Value, verbose: bool) -> String {
         serde_json::Value::String(s) => s.clone(),
         _ => value.to_string(),
     }
+}
+
+fn architecture_modules_for_text_output<'a>(
+    modules: &'a [serde_json::Value],
+    max_modules: usize,
+) -> Vec<&'a serde_json::Value> {
+    if modules.len() <= max_modules {
+        return modules.iter().collect();
+    }
+    let grouped_index = modules.iter().position(|module| {
+        module.get("support_level").and_then(|v| v.as_str()) == Some("unsupported_source_group")
+    });
+    match grouped_index {
+        Some(index) if index >= max_modules => {
+            let mut visible = modules
+                .iter()
+                .take(max_modules.saturating_sub(1))
+                .collect::<Vec<_>>();
+            visible.push(&modules[index]);
+            visible
+        }
+        _ => modules.iter().take(max_modules).collect(),
+    }
+}
+
+fn format_architecture_priority_trust(
+    support_level: &str,
+    actionability: &str,
+) -> Option<String> {
+    if support_level == "indexed" && actionability == "semantic_precise" {
+        return None;
+    }
+    if actionability == "unknown" || actionability == support_level {
+        return Some(support_level.to_string());
+    }
+    Some(format!("{support_level}, {actionability}"))
 }

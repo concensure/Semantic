@@ -17,6 +17,7 @@ async fn main() -> Result<()> {
         RuntimeOptions {
             start_watcher: true,
             ensure_config: true,
+            ..RuntimeOptions::default()
         },
     )?;
     let addr: SocketAddr = "127.0.0.1:4321".parse()?;

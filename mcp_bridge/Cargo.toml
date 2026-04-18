@@ -8,3 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 semantic_app = { path = "../semantic_app" }
+
+[features]
+default = []
+rust-support = ["semantic_app/rust-support"]

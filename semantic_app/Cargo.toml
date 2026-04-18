@@ -19,6 +19,7 @@ fs2.workspace = true
 engine = { path = "../engine" }
 error_log = { path = "../error_log" }
 indexer = { path = "../indexer" }
+parser = { path = "../parser" }
 retrieval = { path = "../retrieval" }
 storage = { path = "../storage" }
 watcher = { path = "../watcher" }
@@ -34,7 +35,13 @@ test_coverage = { path = "../test_coverage" }
 change_propagation = { path = "../change_propagation" }
 dependency_intelligence = { path = "../dependency_intelligence" }
 org_graph = { path = "../org_graph" }
+walkdir.workspace = true
+semantic_rust = { path = "../semantic_rust", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 test_support = { path = "../test_support" }
+
+[features]
+default = []
+rust-support = ["parser/rust-support", "indexer/rust-support", "dep:semantic_rust"]

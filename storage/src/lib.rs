@@ -2,7 +2,8 @@ use anyhow::Result;
 use engine::{
     DependencyRecord, FlowEdgeKind, FlowEdgeRecord, LogicClusterRecord, LogicEdgeRecord,
     LogicNodeRecord, LogicNodeType, ModuleDependency, ModuleFile, ModuleRecord, RepoDependency,
-    RepositoryRecord, SymbolRecord, SymbolType,
+    RepositoryRecord, RustImportRecord, RustIndexedSymbolRecord, RustModuleDeclRecord,
+    RustSymbolMetadataRecord, SymbolRecord, SymbolType,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -269,6 +270,39 @@ impl Storage {
         data_flow_edges: &[FlowEdgeRecord],
         logic_clusters: &[LogicClusterRecord],
     ) -> Result<()> {
+        self.replace_file_index_with_rust_metadata(
+            repo_id,
+            file,
+            language,
+            checksum,
+            symbols,
+            deps,
+            logic_nodes,
+            control_flow_edges,
+            data_flow_edges,
+            logic_clusters,
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    pub fn replace_file_index_with_rust_metadata(
+        &mut self,
+        repo_id: i64,
+        file: &str,
+        language: &str,
+        checksum: &str,
+        symbols: &[SymbolRecord],
+        deps: &[DependencyRecord],
+        logic_nodes: &[LogicNodeRecord],
+        control_flow_edges: &[FlowEdgeRecord],
+        data_flow_edges: &[FlowEdgeRecord],
+        logic_clusters: &[LogicClusterRecord],
+        rust_metadata: &[RustSymbolMetadataRecord],
+        rust_imports: &[RustImportRecord],
+        rust_module_decls: &[RustModuleDeclRecord],
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
 
         tx.execute(
@@ -315,6 +349,13 @@ impl Storage {
              WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
             params![file],
         )?;
+        tx.execute(
+            "DELETE FROM rust_symbol_metadata
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
+        tx.execute("DELETE FROM rust_imports WHERE file = ?1", params![file])?;
+        tx.execute("DELETE FROM rust_module_decls WHERE file = ?1", params![file])?;
         tx.execute("DELETE FROM symbols WHERE file = ?1", params![file])?;
         tx.execute("DELETE FROM dependencies WHERE file = ?1", params![file])?;
 
@@ -422,6 +463,9 @@ impl Storage {
             &inserted_logic_nodes,
         )?;
         insert_logic_clusters_tx(&tx, logic_clusters, &inserted_symbol_ids)?;
+        insert_rust_metadata_tx(&tx, symbols, &inserted_symbol_ids, rust_metadata)?;
+        insert_rust_imports_tx(&tx, rust_imports)?;
+        insert_rust_module_decls_tx(&tx, rust_module_decls)?;
 
         tx.commit()?;
         Ok(())
@@ -459,6 +503,17 @@ impl Storage {
         )?;
         self.conn.execute(
             "DELETE FROM logic_nodes
+             WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
+            params![file],
+        )?;
+        self.conn
+            .execute("DELETE FROM rust_imports WHERE file = ?1", params![file])?;
+        self.conn.execute(
+            "DELETE FROM rust_module_decls WHERE file = ?1",
+            params![file],
+        )?;
+        self.conn.execute(
+            "DELETE FROM rust_symbol_metadata
              WHERE symbol_id IN (SELECT id FROM symbols WHERE file = ?1)",
             params![file],
         )?;
@@ -563,6 +618,125 @@ impl Storage {
                 language: row.get(7)?,
                 summary: row.get(8)?,
                 signature: row.get(9)?,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
+    }
+
+    pub fn list_rust_indexed_symbols(&self) -> Result<Vec<RustIndexedSymbolRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.name, s.type, s.file, s.start_line, s.end_line, s.summary, s.signature,
+                    r.kind, r.owner_name, r.trait_name, r.module_path, r.crate_name, r.crate_root
+             FROM rust_symbol_metadata r
+             JOIN symbols s ON s.id = r.symbol_id
+             ORDER BY s.file, s.start_line, s.end_line, s.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(RustIndexedSymbolRecord {
+                symbol_id: row.get(0)?,
+                name: row.get(1)?,
+                symbol_type: str_to_symbol_type(&row.get::<_, String>(2)?),
+                file: row.get(3)?,
+                start_line: row.get(4)?,
+                end_line: row.get(5)?,
+                summary: row.get(6)?,
+                signature: row.get(7)?,
+                kind: row.get(8)?,
+                owner_name: row.get(9)?,
+                trait_name: row.get(10)?,
+                module_path: row.get(11)?,
+                crate_name: row.get(12)?,
+                crate_root: row.get(13)?,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
+    }
+
+    pub fn search_rust_indexed_symbols(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RustIndexedSymbolRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.name, s.type, s.file, s.start_line, s.end_line, s.summary, s.signature,
+                    r.kind, r.owner_name, r.trait_name, r.module_path, r.crate_name, r.crate_root
+             FROM rust_symbol_metadata r
+             JOIN symbols s ON s.id = r.symbol_id
+             WHERE s.language = 'rust'
+               AND (
+                    s.name = ?1 COLLATE NOCASE
+                    OR s.name LIKE ?2
+                    OR r.owner_name = ?1 COLLATE NOCASE
+                    OR r.trait_name = ?1 COLLATE NOCASE
+                    OR r.module_path LIKE ?2
+                    OR r.crate_name = ?1 COLLATE NOCASE
+               )
+             ORDER BY s.file, s.start_line, s.end_line, s.id
+             LIMIT ?3",
+        )?;
+        let pattern = format!("%{query}%");
+        let rows = stmt.query_map(params![query, pattern, limit as i64], |row| {
+            Ok(RustIndexedSymbolRecord {
+                symbol_id: row.get(0)?,
+                name: row.get(1)?,
+                symbol_type: str_to_symbol_type(&row.get::<_, String>(2)?),
+                file: row.get(3)?,
+                start_line: row.get(4)?,
+                end_line: row.get(5)?,
+                summary: row.get(6)?,
+                signature: row.get(7)?,
+                kind: row.get(8)?,
+                owner_name: row.get(9)?,
+                trait_name: row.get(10)?,
+                module_path: row.get(11)?,
+                crate_name: row.get(12)?,
+                crate_root: row.get(13)?,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
+    }
+
+    pub fn list_rust_imports_for_file(&self, file: &str) -> Result<Vec<RustImportRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file, path, alias, is_glob, start_line, end_line, crate_name
+             FROM rust_imports
+             WHERE file = ?1
+             ORDER BY start_line, end_line, path, alias",
+        )?;
+        let rows = stmt.query_map(params![file], |row| {
+            Ok(RustImportRecord {
+                file: row.get(0)?,
+                path: row.get(1)?,
+                alias: row.get(2)?,
+                is_glob: row.get(3)?,
+                start_line: row.get(4)?,
+                end_line: row.get(5)?,
+                crate_name: row.get(6)?,
+            })
+        })?;
+        let collected: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(collected?)
+    }
+
+    pub fn list_rust_module_decls_for_file(&self, file: &str) -> Result<Vec<RustModuleDeclRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file, module_name, resolved_path, is_inline, start_line, end_line, crate_name
+             FROM rust_module_decls
+             WHERE file = ?1
+             ORDER BY start_line, end_line, module_name",
+        )?;
+        let rows = stmt.query_map(params![file], |row| {
+            Ok(RustModuleDeclRecord {
+                file: row.get(0)?,
+                module_name: row.get(1)?,
+                resolved_path: row.get(2)?,
+                is_inline: row.get(3)?,
+                start_line: row.get(4)?,
+                end_line: row.get(5)?,
+                crate_name: row.get(6)?,
             })
         })?;
         let collected: rusqlite::Result<Vec<_>> = rows.collect();
@@ -1421,6 +1595,93 @@ fn ensure_runtime_migrations(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute("ALTER TABLE symbols ADD COLUMN signature TEXT", []);
     let _ = conn.execute("ALTER TABLE dependencies ADD COLUMN callee_file TEXT", []);
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS rust_symbol_metadata (
+            symbol_id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            owner_name TEXT,
+            trait_name TEXT,
+            module_path TEXT,
+            crate_name TEXT,
+            crate_root TEXT,
+            FOREIGN KEY(symbol_id) REFERENCES symbols(id)
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE rust_symbol_metadata ADD COLUMN crate_name TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE rust_symbol_metadata ADD COLUMN crate_root TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_meta_kind ON rust_symbol_metadata(kind)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_meta_owner ON rust_symbol_metadata(owner_name)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_meta_trait ON rust_symbol_metadata(trait_name)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_meta_module ON rust_symbol_metadata(module_path)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_meta_crate_name ON rust_symbol_metadata(crate_name)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS rust_imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file TEXT NOT NULL,
+            path TEXT NOT NULL,
+            alias TEXT,
+            is_glob INTEGER NOT NULL DEFAULT 0,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            crate_name TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_import_file ON rust_imports(file)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_import_path ON rust_imports(path)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_import_alias ON rust_imports(alias)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS rust_module_decls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file TEXT NOT NULL,
+            module_name TEXT NOT NULL,
+            resolved_path TEXT,
+            is_inline INTEGER NOT NULL DEFAULT 0,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            crate_name TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_module_decl_file ON rust_module_decls(file)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rust_module_decl_name ON rust_module_decls(module_name)",
+        [],
+    );
     Ok(())
 }
 
@@ -1482,6 +1743,108 @@ fn insert_logic_clusters_tx(
             cluster.start_line as i64,
             cluster.end_line as i64,
             cluster.node_count as i64,
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_rust_metadata_tx(
+    tx: &rusqlite::Transaction<'_>,
+    symbols: &[SymbolRecord],
+    inserted_symbol_ids: &[i64],
+    rust_metadata: &[RustSymbolMetadataRecord],
+) -> Result<()> {
+    if rust_metadata.is_empty() {
+        return Ok(());
+    }
+
+    let mut symbol_lookup = HashMap::new();
+    for (symbol, inserted_id) in symbols.iter().zip(inserted_symbol_ids.iter().copied()) {
+        symbol_lookup.insert(
+            (
+                symbol.name.clone(),
+                symbol.file.clone(),
+                symbol.start_line,
+                symbol.end_line,
+            ),
+            inserted_id,
+        );
+    }
+
+    let mut stmt = tx.prepare(
+        "INSERT INTO rust_symbol_metadata(symbol_id, kind, owner_name, trait_name, module_path, crate_name, crate_root)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for record in rust_metadata {
+        let key = (
+            record.symbol_name.clone(),
+            record.file.clone(),
+            record.start_line,
+            record.end_line,
+        );
+        let Some(symbol_id) = symbol_lookup.get(&key).copied() else {
+            continue;
+        };
+        stmt.execute(params![
+            symbol_id,
+            record.kind,
+            record.owner_name,
+            record.trait_name,
+            record.module_path,
+            record.crate_name,
+            record.crate_root,
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_rust_imports_tx(
+    tx: &rusqlite::Transaction<'_>,
+    rust_imports: &[RustImportRecord],
+) -> Result<()> {
+    if rust_imports.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = tx.prepare(
+        "INSERT INTO rust_imports(file, path, alias, is_glob, start_line, end_line, crate_name)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for record in rust_imports {
+        stmt.execute(params![
+            record.file,
+            record.path,
+            record.alias,
+            record.is_glob,
+            record.start_line,
+            record.end_line,
+            record.crate_name,
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_rust_module_decls_tx(
+    tx: &rusqlite::Transaction<'_>,
+    rust_module_decls: &[RustModuleDeclRecord],
+) -> Result<()> {
+    if rust_module_decls.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = tx.prepare(
+        "INSERT INTO rust_module_decls(file, module_name, resolved_path, is_inline, start_line, end_line, crate_name)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for record in rust_module_decls {
+        stmt.execute(params![
+            record.file,
+            record.module_name,
+            record.resolved_path,
+            record.is_inline,
+            record.start_line,
+            record.end_line,
+            record.crate_name,
         ])?;
     }
     Ok(())

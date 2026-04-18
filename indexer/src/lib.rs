@@ -117,7 +117,7 @@ impl Indexer {
                 self.perf_stats.files_excluded += 1;
                 continue;
             }
-            if SupportedLanguage::from_path(&rel_raw).is_none() {
+            if !is_indexable_source(repo_path, &rel_raw) {
                 continue;
             }
             let rel = format!("{prefix}/{rel_raw}");
@@ -170,7 +170,32 @@ impl Indexer {
                 })
                 .collect();
             enrich_dependency_targets(repo_path, &mut prefixed_deps);
-            self.storage.replace_file_index(
+            let rust_metadata = rust_metadata_for_file(repo_path, &rel_raw, &content, true)
+                .into_iter()
+                .map(|mut record| {
+                    record.file = format!("{prefix}/{}", record.file);
+                    record
+                })
+                .collect::<Vec<_>>();
+            let rust_imports = rust_imports_for_file(repo_path, &rel_raw, &content, true)
+                .into_iter()
+                .map(|mut record| {
+                    record.file = format!("{prefix}/{}", record.file);
+                    record
+                })
+                .collect::<Vec<_>>();
+            let rust_module_decls =
+                rust_module_decls_for_file(repo_path, &rel_raw, &content, true)
+                    .into_iter()
+                    .map(|mut record| {
+                        record.file = format!("{prefix}/{}", record.file);
+                        record.resolved_path = record
+                            .resolved_path
+                            .map(|path| format!("{prefix}/{path}"));
+                        record
+                    })
+                    .collect::<Vec<_>>();
+            self.storage.replace_file_index_with_rust_metadata(
                 self.repo_id,
                 &rel,
                 &parsed.language,
@@ -181,6 +206,9 @@ impl Indexer {
                 &parsed.control_flow_edges,
                 &parsed.data_flow_edges,
                 &parsed.logic_clusters,
+                &rust_metadata,
+                &rust_imports,
+                &rust_module_decls,
             )?;
             self.perf_stats.files_indexed += 1;
         }
@@ -232,7 +260,7 @@ impl Indexer {
                 continue;
             }
 
-            if SupportedLanguage::from_path(&rel).is_none() {
+            if !is_indexable_source(repo_path, &rel) {
                 continue;
             }
 
@@ -306,6 +334,9 @@ impl Indexer {
     ) -> Result<()> {
         let started = Instant::now();
         let file_path = repo_path.join(relative_file);
+        if !is_indexable_source(repo_path, relative_file) {
+            return Ok(());
+        }
         let content = fs::read_to_string(&file_path)?;
         let checksum = checksum(&content);
 
@@ -321,7 +352,11 @@ impl Indexer {
         let parsed = self.parser.parse(relative_file, &content)?;
         let mut dependencies = parsed.dependencies.clone();
         enrich_dependency_targets(repo_path, &mut dependencies);
-        self.storage.replace_file_index(
+        let rust_metadata = rust_metadata_for_file(repo_path, relative_file, &content, false);
+        let rust_imports = rust_imports_for_file(repo_path, relative_file, &content, false);
+        let rust_module_decls =
+            rust_module_decls_for_file(repo_path, relative_file, &content, false);
+        self.storage.replace_file_index_with_rust_metadata(
             self.repo_id,
             relative_file,
             &parsed.language,
@@ -332,6 +367,9 @@ impl Indexer {
             &parsed.control_flow_edges,
             &parsed.data_flow_edges,
             &parsed.logic_clusters,
+            &rust_metadata,
+            &rust_imports,
+            &rust_module_decls,
         )?;
         self.perf_stats.file_updates += 1;
         self.perf_stats.files_indexed += 1;
@@ -491,6 +529,11 @@ fn should_skip_indexing_path(relative_path: &str) -> bool {
     let normalized = relative_path.replace('\\', "/");
     let lower = normalized.to_ascii_lowercase();
     let heavy_dirs = [
+        ".venv/",
+        "venv/",
+        "env/",
+        "__pycache__/",
+        "site-packages/",
         "node_modules/",
         "target/",
         "dist/",
@@ -559,6 +602,125 @@ fn push_targeted_file(
     }
     if seen.insert(relative_file.to_string()) {
         files.push(relative_file.to_string());
+    }
+}
+
+fn is_indexable_source(repo_path: &Path, relative_path: &str) -> bool {
+    #[cfg(feature = "rust-support")]
+    {
+        match SupportedLanguage::from_path(relative_path) {
+            Some(SupportedLanguage::Rust) => rust_runtime_enabled(repo_path),
+            Some(_) => true,
+            None => false,
+        }
+    }
+    #[cfg(not(feature = "rust-support"))]
+    {
+        let _ = repo_path;
+        SupportedLanguage::from_path(relative_path).is_some()
+    }
+}
+
+#[cfg(feature = "rust-support")]
+fn rust_runtime_enabled(repo_path: &Path) -> bool {
+    let path = repo_path.join(".semantic").join("rust.toml");
+    let raw = fs::read_to_string(path).unwrap_or_default();
+    for line in raw.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "enabled" {
+                return matches!(value.trim().trim_matches('"'), "true");
+            }
+        }
+    }
+    false
+}
+
+fn rust_metadata_for_file(
+    repo_path: &Path,
+    relative_path: &str,
+    content: &str,
+    prefixed_context: bool,
+) -> Vec<engine::RustSymbolMetadataRecord> {
+    #[cfg(feature = "rust-support")]
+    {
+        let _ = prefixed_context;
+        if !relative_path.ends_with(".rs") {
+            return Vec::new();
+        }
+        let crate_info = semantic_rust::cargo::discover_crate_for_file(repo_path, relative_path);
+        return semantic_rust::extract_metadata(relative_path, content)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut record| {
+                record.crate_name = crate_info.crate_name.clone();
+                record.crate_root = crate_info.crate_root.clone();
+                record
+            })
+            .collect();
+    }
+    #[cfg(not(feature = "rust-support"))]
+    {
+        let _ = (repo_path, relative_path, content, prefixed_context);
+        Vec::new()
+    }
+}
+
+fn rust_imports_for_file(
+    repo_path: &Path,
+    relative_path: &str,
+    content: &str,
+    prefixed_context: bool,
+) -> Vec<engine::RustImportRecord> {
+    #[cfg(feature = "rust-support")]
+    {
+        let _ = prefixed_context;
+        if !relative_path.ends_with(".rs") {
+            return Vec::new();
+        }
+        let crate_info = semantic_rust::cargo::discover_crate_for_file(repo_path, relative_path);
+        return semantic_rust::extract_import_records(relative_path, content)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut record| {
+                record.crate_name = crate_info.crate_name.clone();
+                record
+            })
+            .collect();
+    }
+    #[cfg(not(feature = "rust-support"))]
+    {
+        let _ = (repo_path, relative_path, content, prefixed_context);
+        Vec::new()
+    }
+}
+
+fn rust_module_decls_for_file(
+    repo_path: &Path,
+    relative_path: &str,
+    content: &str,
+    prefixed_context: bool,
+) -> Vec<engine::RustModuleDeclRecord> {
+    #[cfg(feature = "rust-support")]
+    {
+        let _ = prefixed_context;
+        if !relative_path.ends_with(".rs") {
+            return Vec::new();
+        }
+        let crate_info = semantic_rust::cargo::discover_crate_for_file(repo_path, relative_path);
+        return semantic_rust::extract_module_decl_records(relative_path, content)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut record| {
+                record.crate_name = crate_info.crate_name.clone();
+                record
+            })
+            .collect();
+    }
+    #[cfg(not(feature = "rust-support"))]
+    {
+        let _ = (repo_path, relative_path, content, prefixed_context);
+        Vec::new()
     }
 }
 
@@ -903,6 +1065,10 @@ mod tests {
     #[test]
     fn skip_indexing_path_excludes_heavy_dirs_and_artifacts() {
         assert!(super::should_skip_indexing_path("node_modules/react/index.js"));
+        assert!(super::should_skip_indexing_path(".venv/lib/site-packages/pkg/mod.py"));
+        assert!(super::should_skip_indexing_path(
+            "python-sdk/.venv/Lib/site-packages/pydantic/main.py"
+        ));
         assert!(super::should_skip_indexing_path("packages/api/target/debug/app"));
         assert!(super::should_skip_indexing_path("packages/web/dist/main.js"));
         assert!(super::should_skip_indexing_path("packages/web/src/types/generated.d.ts"));

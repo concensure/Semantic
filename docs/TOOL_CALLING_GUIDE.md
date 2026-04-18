@@ -69,6 +69,7 @@ Supported operations and when to use them:
 - `get_reasoning_context`: structured context for edit reasoning (`name`, logic/dependency radii)
 - `get_planned_context`: budgeted, intent-driven context (`query`, `max_tokens`)
 - `get_repo_map_hierarchy`: module -> file -> symbol hierarchy
+  uses the raw stored module graph; current module detection is path-based and coarse, so top-level buckets such as `.claude`, `.semantic`, `test_fixtures`, or `test_repo` may appear if they are indexed
 - `get_module_dependencies`: module dependency edges
 - `search_semantic_symbol`: semantic fallback search when lexical misses (`query`)
 - `get_workspace_reasoning_context`: cross-repository/workspace context (`query`)
@@ -77,6 +78,10 @@ Supported operations and when to use them:
 - `get_data_flow_hints`: data-flow hints for a symbol (`name` or `query` = symbol name)
 - `get_hybrid_ranked_context`: compact hybrid ranked context (`query`, optional `max_tokens`)
   returns ranked spans plus compact graph-rank signals; use `get_control_flow_hints`, `get_data_flow_hints`, or `get_logic_clusters` when you need full graph detail
+- `search_rust_symbol`: Rust symbol lookup using the existing shared retrieval route (`query` or `name`)
+  when optional Rust support is enabled, this stays within the same two-tool surface and may use compiler-backed `rust-analyzer` symbol anchors internally before Semantic ranking/packing
+- `get_rust_context`: grouped Rust definition/impl/method context (`query` or `name`, optional `max_tokens`)
+  when optional Rust support is enabled, this may use compiler-backed `rust-analyzer` anchors internally while still returning the same compact Semantic context shape
 - `get_debug_graph`: current debug failure graph (no params)
 - `get_pipeline_graph`: CI/CD pipeline graph (no params)
 - `get_root_cause_candidates`: root cause candidates from debug graph (no params)
